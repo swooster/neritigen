@@ -7,43 +7,9 @@ use ash::{
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
     vk,
 };
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder},
-};
+use winit::window::Window;
 
-fn main() {
-    env_logger::init();
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Hello, blank window!")
-        .build(&event_loop)
-        .unwrap();
-    let window = Arc::new(window);
-
-    let mut renderer = Renderer::new(window.clone());
-
-    event_loop.run(move |event, _event_loop_target, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => {
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::RedrawRequested(window_id) if window_id == window.id() => {
-                renderer.draw();
-            }
-            _ => (),
-        }
-    });
-}
-
-struct Renderer {
+pub struct Renderer {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     debug_utils_fn: DebugUtils,
@@ -67,7 +33,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(window: Arc<Window>) -> Self {
+    pub fn new(window: Arc<Window>) -> Self {
         unsafe {
             let entry = ash::Entry::new().unwrap();
             let instance = Self::create_instance(&entry, &window);
@@ -490,7 +456,7 @@ impl Renderer {
             .unwrap()[0]
     }
 
-    fn draw(&mut self) {
+    pub fn draw(&mut self) {
         unsafe {
             self.device
                 .wait_for_fences(&[self.presentation_fence], true, u64::MAX)
