@@ -7,6 +7,7 @@ edition = "2018"
 
 [dependencies]
 ash = "0.32.1"
+ash-window = "0.6.0"
 env_logger = "0.8.4"
 log = "0.4.14"
 winit = "0.25.0"
