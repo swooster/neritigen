@@ -1,62 +1,54 @@
-use std::ffi::{CStr, CString};
-use std::os::raw::c_void;
+use std::ffi::CString;
 use std::sync::Arc;
 
 use ash::{
-    extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
-    version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
+    extensions::{khr::Surface, khr::Swapchain},
+    version::{DeviceV1_0, InstanceV1_0},
     vk,
 };
 use winit::window::Window;
 
+mod shared;
+
+use shared::SharedCrown;
+
 pub struct Renderer {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    debug_utils_fn: DebugUtils,
-    debug_utils_messenger: vk::DebugUtilsMessengerEXT,
     device: ash::Device,
-    _entry: ash::Entry,
     framebuffers: Vec<vk::Framebuffer>,
     image_acquired_semaphore: vk::Semaphore,
-    instance: ash::Instance,
     presentation_fence: vk::Fence,
     queues: Queues,
     render_complete_semaphore: vk::Semaphore,
     render_pass: vk::RenderPass,
     resolution: vk::Extent2D,
-    surface: vk::SurfaceKHR,
-    surface_fn: Surface,
+    _shared_crown: SharedCrown,
     swapchain: vk::SwapchainKHR,
     swapchain_fn: Swapchain,
     swapchain_image_views: Vec<vk::ImageView>,
-    _window: Arc<Window>,
 }
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
+        let shared_crown = SharedCrown::new(window.clone());
+
+        let instance = shared_crown.instance();
+        let surface = shared_crown.surface();
+        let surface_fn = shared_crown.surface_fn();
+
+        let winit::dpi::PhysicalSize { width, height } = window.inner_size();
+        let resolution = vk::Extent2D { width, height };
+
         unsafe {
-            let entry = ash::Entry::new().unwrap();
-            let instance = Self::create_instance(&entry, &window);
-
-            let debug_utils_fn = DebugUtils::new(&entry, &instance);
-            let debug_utils_messenger = debug_utils_fn
-                .create_debug_utils_messenger(&Self::debug_utils_messenger_create_info(), None)
-                .unwrap();
-
-            let surface_fn = Surface::new(&entry, &instance);
-            let surface = ash_window::create_surface(&entry, &instance, &*window, None).unwrap();
-
             let (physical_device, device, queues) =
-                Self::create_device_and_queues(&instance, &surface_fn, surface);
+                Self::create_device_and_queues(instance, surface_fn, surface);
 
-            let swapchain_fn = Swapchain::new(&instance, &device);
+            let swapchain_fn = Swapchain::new(instance, &device);
 
-            let surface_format = Self::select_surface_format(&surface_fn, physical_device, surface);
+            let surface_format = Self::select_surface_format(surface_fn, physical_device, surface);
 
             let render_pass = Self::create_render_pass(&device, surface_format.format);
-
-            let winit::dpi::PhysicalSize { width, height } = window.inner_size();
-            let resolution = vk::Extent2D { width, height };
 
             let old_swapchain = vk::SwapchainKHR::null();
             let swapchain = Self::create_swapchain(
@@ -97,88 +89,20 @@ impl Renderer {
             Self {
                 command_pool,
                 command_buffer,
-                debug_utils_fn,
-                debug_utils_messenger,
                 device,
-                _entry: entry,
                 framebuffers,
                 image_acquired_semaphore,
-                instance,
                 presentation_fence,
                 queues,
                 render_complete_semaphore,
                 render_pass,
                 resolution,
-                surface,
-                surface_fn,
+                _shared_crown: shared_crown,
                 swapchain,
                 swapchain_fn,
                 swapchain_image_views,
-                _window: window,
             }
         }
-    }
-
-    unsafe fn create_instance(entry: &ash::Entry, window: &Window) -> ash::Instance {
-        let application_name = CString::new("Nerigen").unwrap();
-        let application_version = vk::make_version(
-            env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap(),
-            env!("CARGO_PKG_VERSION_MINOR").parse().unwrap(),
-            env!("CARGO_PKG_VERSION_PATCH").parse().unwrap(),
-        );
-        let application_info = vk::ApplicationInfo::builder()
-            .application_name(&application_name)
-            .application_version(application_version)
-            .engine_name(&application_name)
-            .engine_version(application_version)
-            .api_version(vk::make_version(1, 0, 0));
-
-        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
-        let enabled_layer_names = [validation_layer.as_ptr()];
-        let mut enabled_extension_names =
-            ash_window::enumerate_required_extensions(window).unwrap();
-        enabled_extension_names.push(DebugUtils::name());
-        let enabled_extension_names: Vec<_> = enabled_extension_names
-            .into_iter()
-            .map(|name| name.as_ptr())
-            .collect();
-        let mut debug_utils_messenger_create_info = Self::debug_utils_messenger_create_info();
-        let create_info = vk::InstanceCreateInfo::builder()
-            .application_info(&application_info)
-            .enabled_layer_names(&enabled_layer_names)
-            .enabled_extension_names(&enabled_extension_names)
-            .push_next(&mut debug_utils_messenger_create_info);
-
-        entry.create_instance(&create_info, None).unwrap()
-    }
-
-    fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBuilder<'static> {
-        vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::all())
-            .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-            .pfn_user_callback(Some(Self::debug_utils_callback))
-    }
-
-    unsafe extern "system" fn debug_utils_callback(
-        message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-        message_types: vk::DebugUtilsMessageTypeFlagsEXT,
-        p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-        _p_user_data: *mut c_void,
-    ) -> u32 {
-        let message_severity = match message_severity {
-            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => log::Level::Debug,
-            vk::DebugUtilsMessageSeverityFlagsEXT::INFO => log::Level::Info,
-            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => log::Level::Warn,
-            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => log::Level::Error,
-            _ => log::Level::Error,
-        };
-        let message = CStr::from_ptr((*p_callback_data).p_message);
-        if let Ok(message) = message.to_str() {
-            log::log!(message_severity, "{:?}: {}", message_types, message);
-        } else {
-            log::log!(message_severity, "{:?}: {:?}", message_types, message);
-        }
-        vk::FALSE
     }
 
     unsafe fn create_device_and_queues(
@@ -565,10 +489,6 @@ impl Drop for Renderer {
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
             self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_device(None);
-            self.surface_fn.destroy_surface(self.surface, None);
-            self.debug_utils_fn
-                .destroy_debug_utils_messenger(self.debug_utils_messenger, None);
-            self.instance.destroy_instance(None);
         }
     }
 }
