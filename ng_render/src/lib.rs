@@ -1,178 +1,76 @@
-use std::ffi::CString;
 use std::sync::Arc;
 
 use ash::{
     extensions::{khr::Surface, khr::Swapchain},
-    version::{DeviceV1_0, InstanceV1_0},
+    version::DeviceV1_0,
     vk,
 };
 use winit::window::Window;
 
 mod shared;
 
-use shared::SharedCrown;
+use shared::{Queues, SharedCrown, SharedStem};
 
 pub struct Renderer {
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    device: ash::Device,
     framebuffers: Vec<vk::Framebuffer>,
-    image_acquired_semaphore: vk::Semaphore,
-    presentation_fence: vk::Fence,
-    queues: Queues,
-    render_complete_semaphore: vk::Semaphore,
     render_pass: vk::RenderPass,
     resolution: vk::Extent2D,
-    _shared_crown: SharedCrown,
+    shared_stem: SharedStem,
     swapchain: vk::SwapchainKHR,
-    swapchain_fn: Swapchain,
     swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
         let shared_crown = SharedCrown::new(window.clone());
+        let shared_stem = SharedStem::new(shared_crown);
 
-        let instance = shared_crown.instance();
-        let surface = shared_crown.surface();
-        let surface_fn = shared_crown.surface_fn();
+        let device = shared_stem.device();
+        let physical_device = shared_stem.physical_device();
+        let queues = shared_stem.queues();
+        let surface = shared_stem.surface();
+        let surface_fn = shared_stem.surface_fn();
+        let swapchain_fn = shared_stem.swapchain_fn();
 
         let winit::dpi::PhysicalSize { width, height } = window.inner_size();
         let resolution = vk::Extent2D { width, height };
 
         unsafe {
-            let (physical_device, device, queues) =
-                Self::create_device_and_queues(instance, surface_fn, surface);
-
-            let swapchain_fn = Swapchain::new(instance, &device);
-
             let surface_format = Self::select_surface_format(surface_fn, physical_device, surface);
 
             let render_pass = Self::create_render_pass(&device, surface_format.format);
 
             let old_swapchain = vk::SwapchainKHR::null();
             let swapchain = Self::create_swapchain(
-                &surface_fn,
-                &swapchain_fn,
+                surface_fn,
+                swapchain_fn,
                 physical_device,
                 surface,
                 surface_format,
                 resolution,
-                &queues,
+                queues,
                 old_swapchain,
             );
 
             let swapchain_image_views = Self::create_swapchain_image_views(
-                &swapchain_fn,
-                &device,
+                swapchain_fn,
+                device,
                 swapchain,
                 surface_format.format,
             );
 
             let framebuffers =
-                Self::create_framebuffers(&device, render_pass, &swapchain_image_views, resolution);
-
-            let command_pool = Self::create_command_pool(&device, queues.graphics_family);
-            let command_buffer = Self::allocate_command_buffer(&device, command_pool);
-
-            let image_acquired_semaphore =
-                device.create_semaphore(&Default::default(), None).unwrap();
-            let render_complete_semaphore =
-                device.create_semaphore(&Default::default(), None).unwrap();
-
-            let signaled_fence_create_info =
-                vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
-            let presentation_fence = device
-                .create_fence(&signaled_fence_create_info, None)
-                .unwrap();
+                Self::create_framebuffers(device, render_pass, &swapchain_image_views, resolution);
 
             Self {
-                command_pool,
-                command_buffer,
-                device,
                 framebuffers,
-                image_acquired_semaphore,
-                presentation_fence,
-                queues,
-                render_complete_semaphore,
                 render_pass,
                 resolution,
-                _shared_crown: shared_crown,
+                shared_stem,
                 swapchain,
-                swapchain_fn,
                 swapchain_image_views,
             }
         }
-    }
-
-    unsafe fn create_device_and_queues(
-        instance: &ash::Instance,
-        surface_fn: &Surface,
-        surface: vk::SurfaceKHR,
-    ) -> (vk::PhysicalDevice, ash::Device, Queues) {
-        let (physical_device, graphics_queue_family, present_queue_family) =
-            Self::select_physical_device_and_queue_families(instance, surface_fn, surface);
-
-        let queue_priorities = [1.0];
-        let queue_create_infos = [
-            vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(graphics_queue_family)
-                .queue_priorities(&queue_priorities)
-                .build(),
-            vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(present_queue_family)
-                .queue_priorities(&queue_priorities)
-                .build(),
-        ];
-        let queue_create_infos = if graphics_queue_family == present_queue_family {
-            &queue_create_infos[0..1]
-        } else {
-            &queue_create_infos
-        };
-
-        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
-        let enabled_layer_names = [validation_layer.as_ptr()];
-
-        let enabled_extension_names = [Swapchain::name().as_ptr()];
-        let device_create_info = vk::DeviceCreateInfo::builder()
-            .queue_create_infos(queue_create_infos)
-            .enabled_extension_names(&enabled_extension_names)
-            .enabled_layer_names(&enabled_layer_names);
-        let device = instance
-            .create_device(physical_device, &device_create_info, None)
-            .unwrap();
-
-        let queues = Queues {
-            graphics: device.get_device_queue(graphics_queue_family, 0),
-            graphics_family: graphics_queue_family,
-            present: device.get_device_queue(present_queue_family, 0),
-            present_family: present_queue_family,
-        };
-
-        (physical_device, device, queues)
-    }
-
-    unsafe fn select_physical_device_and_queue_families(
-        instance: &ash::Instance,
-        surface_fn: &Surface,
-        surface: vk::SurfaceKHR,
-    ) -> (vk::PhysicalDevice, u32, u32) {
-        for physical_device in instance.enumerate_physical_devices().unwrap() {
-            let queue_families =
-                instance.get_physical_device_queue_family_properties(physical_device);
-            let graphics_queue = queue_families
-                .iter()
-                .position(|info| info.queue_flags.contains(vk::QueueFlags::GRAPHICS));
-            let present_queue = queue_families.iter().enumerate().position(|(i, _)| {
-                surface_fn
-                    .get_physical_device_surface_support(physical_device, i as _, surface)
-                    .unwrap()
-            });
-            if let (Some(graphics_queue), Some(present_queue)) = (graphics_queue, present_queue) {
-                return (physical_device, graphics_queue as _, present_queue as _);
-            }
-        }
-        panic!("No suitable device found");
     }
 
     unsafe fn select_surface_format(
@@ -356,52 +254,32 @@ impl Renderer {
             .collect()
     }
 
-    unsafe fn create_command_pool(
-        device: &ash::Device,
-        queue_family_index: u32,
-    ) -> vk::CommandPool {
-        let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-            .queue_family_index(queue_family_index);
-        device
-            .create_command_pool(&command_pool_create_info, None)
-            .unwrap()
-    }
-
-    unsafe fn allocate_command_buffer(
-        device: &ash::Device,
-        command_pool: vk::CommandPool,
-    ) -> vk::CommandBuffer {
-        let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(command_pool)
-            .command_buffer_count(1);
-        device
-            .allocate_command_buffers(&command_buffer_allocate_info)
-            .unwrap()[0]
-    }
-
     pub fn draw(&mut self) {
+        let command_buffer = self.shared_stem.command_buffer();
+        let device = self.shared_stem.device();
+        let image_acquired_semaphore = self.shared_stem.image_acquired_semaphore();
+        let presentation_fence = self.shared_stem.presentation_fence();
+        let queues = self.shared_stem.queues();
+        let render_complete_semaphore = self.shared_stem.render_complete_semaphore();
+        let swapchain_fn = self.shared_stem.swapchain_fn();
         unsafe {
-            self.device
-                .wait_for_fences(&[self.presentation_fence], true, u64::MAX)
+            device
+                .wait_for_fences(&[presentation_fence], true, u64::MAX)
                 .unwrap();
-            self.device
-                .reset_fences(&[self.presentation_fence])
-                .unwrap();
+            device.reset_fences(&[presentation_fence]).unwrap();
 
-            let (image_index, suboptimal_acquire) = self
-                .swapchain_fn
+            let (image_index, suboptimal_acquire) = swapchain_fn
                 .acquire_next_image(
                     self.swapchain,
                     u64::MAX,
-                    self.image_acquired_semaphore,
+                    image_acquired_semaphore,
                     vk::Fence::null(),
                 )
                 .unwrap();
             assert!(!suboptimal_acquire);
 
-            let command_buffer = self.command_buffer;
-            self.device
+            let command_buffer = command_buffer;
+            device
                 .reset_command_buffer(
                     command_buffer,
                     vk::CommandBufferResetFlags::RELEASE_RESOURCES,
@@ -409,7 +287,7 @@ impl Renderer {
                 .unwrap();
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device
+            device
                 .begin_command_buffer(command_buffer, &command_buffer_begin_info)
                 .unwrap();
 
@@ -429,40 +307,39 @@ impl Renderer {
                 .framebuffer(self.framebuffers[image_index as usize])
                 .render_area(render_area)
                 .clear_values(&clear_values);
-            self.device.cmd_begin_render_pass(
+            device.cmd_begin_render_pass(
                 command_buffer,
                 &render_pass_begin_info,
                 vk::SubpassContents::INLINE,
             );
 
-            self.device.cmd_end_render_pass(command_buffer);
+            device.cmd_end_render_pass(command_buffer);
 
-            self.device.end_command_buffer(command_buffer).unwrap();
+            device.end_command_buffer(command_buffer).unwrap();
 
-            let wait_semaphores = [self.image_acquired_semaphore];
+            let wait_semaphores = [image_acquired_semaphore];
             let wait_dst_stage_mask = [vk::PipelineStageFlags::TOP_OF_PIPE];
             let command_buffers = [command_buffer];
-            let signal_semaphores = [self.render_complete_semaphore];
+            let signal_semaphores = [render_complete_semaphore];
             let submit_info = vk::SubmitInfo::builder()
                 .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_dst_stage_mask)
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             let submit_infos = [submit_info.build()];
-            self.device
-                .queue_submit(self.queues.graphics, &submit_infos, self.presentation_fence)
+            device
+                .queue_submit(queues.graphics, &submit_infos, presentation_fence)
                 .unwrap();
 
-            let wait_semaphores = [self.render_complete_semaphore];
+            let wait_semaphores = [render_complete_semaphore];
             let swapchains = [self.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::builder()
                 .wait_semaphores(&wait_semaphores)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            let present_result = self
-                .swapchain_fn
-                .queue_present(self.queues.present, &present_info)
+            let present_result = swapchain_fn
+                .queue_present(queues.present, &present_info)
                 .unwrap();
             assert!(!present_result);
         }
@@ -471,31 +348,19 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        let device = self.shared_stem.device();
+        let swapchain_fn = self.shared_stem.swapchain_fn();
         unsafe {
-            let _ = self.device.device_wait_idle();
+            let _ = device.device_wait_idle();
 
-            self.device.destroy_fence(self.presentation_fence, None);
-            self.device
-                .destroy_semaphore(self.image_acquired_semaphore, None);
-            self.device
-                .destroy_semaphore(self.render_complete_semaphore, None);
-            self.device.destroy_command_pool(self.command_pool, None);
             for &framebuffer in self.framebuffers.iter() {
-                self.device.destroy_framebuffer(framebuffer, None);
+                device.destroy_framebuffer(framebuffer, None);
             }
             for &image_view in self.swapchain_image_views.iter() {
-                self.device.destroy_image_view(image_view, None);
+                device.destroy_image_view(image_view, None);
             }
-            self.swapchain_fn.destroy_swapchain(self.swapchain, None);
-            self.device.destroy_render_pass(self.render_pass, None);
-            self.device.destroy_device(None);
+            swapchain_fn.destroy_swapchain(self.swapchain, None);
+            device.destroy_render_pass(self.render_pass, None);
         }
     }
-}
-
-struct Queues {
-    graphics: vk::Queue,
-    graphics_family: u32,
-    present: vk::Queue,
-    present_family: u32,
 }
