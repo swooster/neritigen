@@ -5,23 +5,43 @@ use winit::window::Window;
 
 mod shared;
 
-use shared::{SharedCrown, SharedFrond, SharedStem};
+use shared::{SharedCrown, SharedFrond, SharedFrondSwapchain, SharedStem};
 
-pub struct Renderer {
-    shared_frond: SharedFrond,
+pub enum Renderer {
+    Live(SharedFrond),
+    Dead(SharedFrondSwapchain),
+    Invalid, // FIXME: use something like replace_with() to avoid this?
 }
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
-        let shared_crown = SharedCrown::new(window);
-        let shared_stem = SharedStem::new(shared_crown);
+        let shared_crown = Arc::new(SharedCrown::new(window));
+        let shared_stem = Arc::new(SharedStem::new(shared_crown));
         let shared_frond = SharedFrond::new(shared_stem);
 
-        Self { shared_frond }
+        Self::Live(shared_frond)
     }
 
     pub fn draw(&mut self) {
-        let stem = self.shared_frond.stem();
+        if let Self::Live(ref frond) = self {
+            if frond.stem().crown().window_resolution() != frond.resolution() {
+                self.resize();
+            }
+        }
+        self.ressurect();
+
+        if let Self::Live(ref frond) = self {
+            Self::_draw(frond);
+        }
+    }
+
+    fn _draw(frond: &SharedFrond) -> bool {
+        let framebuffers = frond.framebuffers();
+        let render_pass = frond.render_pass();
+        let resolution = frond.resolution();
+        let swapchain = frond.swapchain();
+
+        let stem = frond.stem();
         let command_buffer = stem.command_buffer();
         let device = stem.device();
         let image_acquired_semaphore = stem.image_acquired_semaphore();
@@ -29,12 +49,6 @@ impl Renderer {
         let queues = stem.queues();
         let render_complete_semaphore = stem.render_complete_semaphore();
         let swapchain_fn = stem.swapchain_fn();
-
-        let frond = &self.shared_frond;
-        let framebuffers = frond.framebuffers();
-        let render_pass = frond.render_pass();
-        let resolution = frond.resolution();
-        let swapchain = frond.swapchain();
 
         unsafe {
             device
@@ -112,10 +126,25 @@ impl Renderer {
                 .wait_semaphores(&wait_semaphores)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            let present_result = swapchain_fn
-                .queue_present(queues.present, &present_info)
-                .unwrap();
-            assert!(!present_result);
+            let present_result = swapchain_fn.queue_present(queues.present, &present_info);
+            present_result == Ok(false)
         }
+    }
+
+    fn resize(&mut self) {
+        *self = match std::mem::replace(self, Self::Invalid) {
+            Self::Live(frond) => Self::Dead(frond.take_swapchain()),
+            x => x,
+        };
+    }
+
+    fn ressurect(&mut self) {
+        *self = match std::mem::replace(self, Self::Invalid) {
+            Self::Dead(swapchain) => match swapchain.ressurect() {
+                Ok(frond) => Self::Live(frond),
+                Err(swapchain) => Self::Dead(swapchain),
+            },
+            x => x,
+        };
     }
 }

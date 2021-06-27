@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
@@ -14,7 +14,7 @@ pub struct SharedCrown {
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
     _entry: ash::Entry,
     instance: ash::Instance,
-    surface: vk::SurfaceKHR,
+    surface: Mutex<vk::SurfaceKHR>, // swapchain creation needs surface to be host-synchronized
     surface_fn: Surface,
     window: Arc<Window>,
 }
@@ -30,7 +30,8 @@ impl SharedCrown {
                 .create_debug_utils_messenger(&Self::debug_utils_messenger_create_info(), None)
                 .unwrap();
 
-            let surface = ash_window::create_surface(&entry, &instance, &*window, None).unwrap();
+            let surface =
+                Mutex::new(ash_window::create_surface(&entry, &instance, &*window, None).unwrap());
             let surface_fn = Surface::new(&entry, &instance);
 
             Self {
@@ -111,23 +112,25 @@ impl SharedCrown {
         &self.instance
     }
 
-    pub fn surface(&self) -> vk::SurfaceKHR {
-        self.surface
+    pub fn surface(&self) -> &Mutex<vk::SurfaceKHR> {
+        &self.surface
     }
 
     pub fn surface_fn(&self) -> &Surface {
         &self.surface_fn
     }
 
-    pub fn window(&self) -> Arc<Window> {
-        self.window.clone()
+    pub fn window_resolution(&self) -> vk::Extent2D {
+        let winit::dpi::PhysicalSize { width, height } = self.window.inner_size();
+        vk::Extent2D { width, height }
     }
 }
 
 impl Drop for SharedCrown {
     fn drop(&mut self) {
+        let surface = self.surface.lock().unwrap();
         unsafe {
-            self.surface_fn.destroy_surface(self.surface, None);
+            self.surface_fn.destroy_surface(*surface, None);
             self.debug_utils_fn
                 .destroy_debug_utils_messenger(self.debug_utils_messenger, None);
             self.instance.destroy_instance(None);
@@ -138,7 +141,7 @@ impl Drop for SharedCrown {
 pub struct SharedStem {
     command_buffer: vk::CommandBuffer,
     command_pool: vk::CommandPool,
-    crown: SharedCrown,
+    crown: Arc<SharedCrown>,
     device: ash::Device,
     image_acquired_semaphore: vk::Semaphore,
     physical_device: vk::PhysicalDevice,
@@ -149,14 +152,15 @@ pub struct SharedStem {
 }
 
 impl SharedStem {
-    pub fn new(crown: SharedCrown) -> Self {
+    pub fn new(crown: Arc<SharedCrown>) -> Self {
         let instance = crown.instance();
         let surface = crown.surface();
+        let surface = surface.lock().unwrap();
         let surface_fn = crown.surface_fn();
 
         unsafe {
             let (physical_device, device, queues) =
-                Self::create_device_and_queues(instance, surface_fn, surface);
+                Self::create_device_and_queues(instance, surface_fn, *surface);
 
             let swapchain_fn = Swapchain::new(instance, &device);
 
@@ -173,6 +177,8 @@ impl SharedStem {
             let presentation_fence = device
                 .create_fence(&signaled_fence_create_info, None)
                 .unwrap();
+
+            drop(surface);
 
             Self {
                 command_buffer,
@@ -287,8 +293,8 @@ impl SharedStem {
         self.command_buffer
     }
 
-    pub fn crown(&self) -> &SharedCrown {
-        &self.crown
+    pub fn crown(&self) -> Arc<SharedCrown> {
+        self.crown.clone()
     }
 
     pub fn device(&self) -> &ash::Device {
@@ -347,37 +353,42 @@ pub struct SharedFrond {
     framebuffers: Vec<vk::Framebuffer>,
     render_pass: vk::RenderPass,
     resolution: vk::Extent2D,
-    stem: SharedStem,
+    stem: Arc<SharedStem>,
     swapchain: vk::SwapchainKHR,
     swapchain_image_views: Vec<vk::ImageView>,
 }
 
 impl SharedFrond {
-    pub fn new(stem: SharedStem) -> Self {
+    pub fn new(stem: Arc<SharedStem>) -> Self {
+        Self::_new(stem, None)
+    }
+
+    fn _new(stem: Arc<SharedStem>, old_swapchain: Option<SharedFrondSwapchain>) -> Self {
         let device = stem.device();
         let physical_device = stem.physical_device();
         let queues = stem.queues();
         let swapchain_fn = stem.swapchain_fn();
 
         let crown = stem.crown();
-        let window = crown.window();
         let surface = crown.surface();
+        let surface = surface.lock().unwrap();
         let surface_fn = crown.surface_fn();
-
-        let winit::dpi::PhysicalSize { width, height } = window.inner_size();
-        let resolution = vk::Extent2D { width, height };
+        let resolution = crown.window_resolution();
 
         unsafe {
-            let surface_format = Self::select_surface_format(surface_fn, physical_device, surface);
+            let surface_format = Self::select_surface_format(surface_fn, physical_device, *surface);
 
             let render_pass = Self::create_render_pass(&device, surface_format.format);
 
-            let old_swapchain = vk::SwapchainKHR::null();
+            let old_swapchain = old_swapchain
+                .as_ref() // Don't destroy the swapchain before it's used
+                .map(|s| s.swapchain())
+                .unwrap_or_default();
             let swapchain = Self::create_swapchain(
                 surface_fn,
                 swapchain_fn,
                 physical_device,
-                surface,
+                *surface,
                 surface_format,
                 resolution,
                 queues,
@@ -586,6 +597,13 @@ impl SharedFrond {
             .collect()
     }
 
+    pub fn take_swapchain(mut self) -> SharedFrondSwapchain {
+        SharedFrondSwapchain {
+            stem: self.stem.clone(),
+            swapchain: std::mem::take(&mut self.swapchain),
+        }
+    }
+
     pub fn framebuffers(&self) -> &[vk::Framebuffer] {
         &self.framebuffers
     }
@@ -598,8 +616,8 @@ impl SharedFrond {
         self.resolution
     }
 
-    pub fn stem(&self) -> &SharedStem {
-        &self.stem
+    pub fn stem(&self) -> Arc<SharedStem> {
+        self.stem.clone()
     }
 
     pub fn swapchain(&self) -> vk::SwapchainKHR {
@@ -622,6 +640,39 @@ impl Drop for SharedFrond {
             }
             swapchain_fn.destroy_swapchain(self.swapchain, None);
             device.destroy_render_pass(self.render_pass, None);
+        }
+    }
+}
+
+pub struct SharedFrondSwapchain {
+    stem: Arc<SharedStem>,
+    swapchain: vk::SwapchainKHR,
+}
+
+impl SharedFrondSwapchain {
+    pub fn ressurect(self) -> Result<SharedFrond, SharedFrondSwapchain> {
+        let resolution = self.stem.crown().window_resolution();
+        if resolution.width > 0 && resolution.height > 0 {
+            Ok(SharedFrond::_new(self.stem.clone(), Some(self)))
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn swapchain(&self) -> vk::SwapchainKHR {
+        self.swapchain
+    }
+}
+
+impl Drop for SharedFrondSwapchain {
+    fn drop(&mut self) {
+        let device = self.stem.device();
+        let swapchain_fn = self.stem.swapchain_fn();
+
+        unsafe {
+            let _ = device.device_wait_idle();
+
+            swapchain_fn.destroy_swapchain(self.swapchain, None);
         }
     }
 }
