@@ -16,7 +16,7 @@ pub struct SharedCrown {
     instance: ash::Instance,
     surface: vk::SurfaceKHR,
     surface_fn: Surface,
-    _window: Arc<Window>,
+    window: Arc<Window>,
 }
 
 impl SharedCrown {
@@ -40,7 +40,7 @@ impl SharedCrown {
                 instance,
                 surface,
                 surface_fn,
-                _window: window,
+                window,
             }
         }
     }
@@ -117,6 +117,10 @@ impl SharedCrown {
 
     pub fn surface_fn(&self) -> &Surface {
         &self.surface_fn
+    }
+
+    pub fn window(&self) -> Arc<Window> {
+        self.window.clone()
     }
 }
 
@@ -283,6 +287,10 @@ impl SharedStem {
         self.command_buffer
     }
 
+    pub fn crown(&self) -> &SharedCrown {
+        &self.crown
+    }
+
     pub fn device(&self) -> &ash::Device {
         &self.device
     }
@@ -305,14 +313,6 @@ impl SharedStem {
 
     pub fn render_complete_semaphore(&self) -> vk::Semaphore {
         self.render_complete_semaphore
-    }
-
-    pub fn surface(&self) -> vk::SurfaceKHR {
-        self.crown.surface()
-    }
-
-    pub fn surface_fn(&self) -> &Surface {
-        self.crown.surface_fn()
     }
 
     pub fn swapchain_fn(&self) -> &Swapchain {
@@ -341,4 +341,287 @@ pub struct Queues {
     pub graphics_family: u32,
     pub present: vk::Queue,
     pub present_family: u32,
+}
+
+pub struct SharedFrond {
+    framebuffers: Vec<vk::Framebuffer>,
+    render_pass: vk::RenderPass,
+    resolution: vk::Extent2D,
+    stem: SharedStem,
+    swapchain: vk::SwapchainKHR,
+    swapchain_image_views: Vec<vk::ImageView>,
+}
+
+impl SharedFrond {
+    pub fn new(stem: SharedStem) -> Self {
+        let device = stem.device();
+        let physical_device = stem.physical_device();
+        let queues = stem.queues();
+        let swapchain_fn = stem.swapchain_fn();
+
+        let crown = stem.crown();
+        let window = crown.window();
+        let surface = crown.surface();
+        let surface_fn = crown.surface_fn();
+
+        let winit::dpi::PhysicalSize { width, height } = window.inner_size();
+        let resolution = vk::Extent2D { width, height };
+
+        unsafe {
+            let surface_format = Self::select_surface_format(surface_fn, physical_device, surface);
+
+            let render_pass = Self::create_render_pass(&device, surface_format.format);
+
+            let old_swapchain = vk::SwapchainKHR::null();
+            let swapchain = Self::create_swapchain(
+                surface_fn,
+                swapchain_fn,
+                physical_device,
+                surface,
+                surface_format,
+                resolution,
+                queues,
+                old_swapchain,
+            );
+
+            let swapchain_image_views = Self::create_swapchain_image_views(
+                swapchain_fn,
+                device,
+                swapchain,
+                surface_format.format,
+            );
+
+            let framebuffers =
+                Self::create_framebuffers(device, render_pass, &swapchain_image_views, resolution);
+
+            Self {
+                framebuffers,
+                render_pass,
+                resolution,
+                stem,
+                swapchain,
+                swapchain_image_views,
+            }
+        }
+    }
+
+    unsafe fn select_surface_format(
+        surface_fn: &Surface,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
+    ) -> vk::SurfaceFormatKHR {
+        let surface_formats = surface_fn
+            .get_physical_device_surface_formats(physical_device, surface)
+            .unwrap();
+        let desired_formats = [
+            vk::SurfaceFormatKHR {
+                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+                format: vk::Format::B8G8R8A8_SRGB,
+            },
+            // TODO: Support other formats?
+        ];
+        *desired_formats
+            .iter()
+            .find(|&&desired_format| surface_formats.iter().any(|&sfmt| sfmt == desired_format))
+            .unwrap()
+    }
+
+    unsafe fn create_render_pass(
+        device: &ash::Device,
+        surface_format: vk::Format,
+    ) -> vk::RenderPass {
+        let attachments = [vk::AttachmentDescription::builder()
+            .format(surface_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .build()];
+
+        let color_attachment_refs = [vk::AttachmentReference::builder()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .build()];
+        let subpasses = [vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachment_refs)
+            .build()];
+
+        let dependencies = [];
+
+        let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        device
+            .create_render_pass(&render_pass_create_info, None)
+            .unwrap()
+    }
+
+    unsafe fn create_swapchain(
+        surface_fn: &Surface,
+        swapchain_fn: &Swapchain,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
+        surface_format: vk::SurfaceFormatKHR,
+        default_resolution: vk::Extent2D,
+        queues: &Queues,
+        old_swapchain: vk::SwapchainKHR,
+    ) -> vk::SwapchainKHR {
+        let surface_capabilities = surface_fn
+            .get_physical_device_surface_capabilities(physical_device, surface)
+            .unwrap();
+
+        let max_image_count = match surface_capabilities.max_image_count {
+            0 => u32::MAX,
+            x => x,
+        };
+        let min_image_count = (surface_capabilities.min_image_count + 1).min(max_image_count);
+
+        let image_extent = match surface_capabilities.current_extent {
+            vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            } => default_resolution,
+            x => x,
+        };
+
+        let transform = if surface_capabilities
+            .supported_transforms
+            .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+        {
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        } else {
+            surface_capabilities.current_transform
+        };
+
+        let present_mode = surface_fn
+            .get_physical_device_surface_present_modes(physical_device, surface)
+            .unwrap()
+            .into_iter()
+            .find(|&m| m == vk::PresentModeKHR::MAILBOX)
+            .unwrap_or(vk::PresentModeKHR::FIFO);
+
+        let queue_families = [queues.graphics_family, queues.present_family];
+        let (image_sharing_mode, queue_families) =
+            if queues.graphics_family == queues.present_family {
+                (vk::SharingMode::EXCLUSIVE, &queue_families[..1])
+            } else {
+                (vk::SharingMode::CONCURRENT, &queue_families[..])
+            };
+
+        let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+            .surface(surface)
+            .min_image_count(min_image_count)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
+            .image_extent(image_extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_sharing_mode(image_sharing_mode)
+            .queue_family_indices(queue_families)
+            .pre_transform(transform)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(present_mode)
+            .clipped(true)
+            .old_swapchain(old_swapchain);
+
+        swapchain_fn
+            .create_swapchain(&swapchain_create_info, None)
+            .unwrap()
+    }
+
+    unsafe fn create_swapchain_image_views(
+        swapchain_fn: &Swapchain,
+        device: &ash::Device,
+        swapchain: vk::SwapchainKHR,
+        format: vk::Format,
+    ) -> Vec<vk::ImageView> {
+        let subresource_range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1)
+            .build();
+
+        swapchain_fn
+            .get_swapchain_images(swapchain)
+            .unwrap()
+            .iter()
+            .map(|image| {
+                let image_view_create_info = vk::ImageViewCreateInfo::builder()
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(subresource_range)
+                    .image(*image);
+                device
+                    .create_image_view(&image_view_create_info, None)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    unsafe fn create_framebuffers(
+        device: &ash::Device,
+        render_pass: vk::RenderPass,
+        image_views: &[vk::ImageView],
+        resolution: vk::Extent2D,
+    ) -> Vec<vk::Framebuffer> {
+        image_views
+            .iter()
+            .map(|&image_view| {
+                let attachments = [image_view];
+                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(resolution.width)
+                    .height(resolution.height)
+                    .layers(1);
+                device
+                    .create_framebuffer(&framebuffer_create_info, None)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    pub fn framebuffers(&self) -> &[vk::Framebuffer] {
+        &self.framebuffers
+    }
+
+    pub fn render_pass(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+
+    pub fn resolution(&self) -> vk::Extent2D {
+        self.resolution
+    }
+
+    pub fn stem(&self) -> &SharedStem {
+        &self.stem
+    }
+
+    pub fn swapchain(&self) -> vk::SwapchainKHR {
+        self.swapchain
+    }
+}
+
+impl Drop for SharedFrond {
+    fn drop(&mut self) {
+        let device = self.stem.device();
+        let swapchain_fn = self.stem.swapchain_fn();
+        unsafe {
+            let _ = device.device_wait_idle();
+
+            for &framebuffer in self.framebuffers.iter() {
+                device.destroy_framebuffer(framebuffer, None);
+            }
+            for &image_view in self.swapchain_image_views.iter() {
+                device.destroy_image_view(image_view, None);
+            }
+            swapchain_fn.destroy_swapchain(self.swapchain, None);
+            device.destroy_render_pass(self.render_pass, None);
+        }
+    }
 }
