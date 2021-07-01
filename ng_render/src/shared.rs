@@ -4,10 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
+    prelude::VkResult,
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
     vk,
 };
+use thiserror::Error;
 use winit::window::Window;
+
+use crate::guard::{GuardableResource, Guarded};
 
 pub struct SharedCrown {
     debug_utils_fn: DebugUtils,
@@ -19,34 +23,47 @@ pub struct SharedCrown {
     window: Arc<Window>,
 }
 
+#[derive(Error, Debug)]
+pub enum SharedCrownError {
+    #[error("Vulkan error occurred")]
+    VkError(#[from] vk::Result), // TODO: split into contexts
+    #[error("Couldn't create Entry")]
+    EntryError(#[from] ash::LoadingError),
+    #[error("Couldn't create Instance")]
+    InstanceError(#[from] ash::InstanceError),
+}
+
 impl SharedCrown {
-    pub fn new(window: Arc<Window>) -> Self {
+    pub fn new(window: Arc<Window>) -> Result<Self, SharedCrownError> {
         unsafe {
-            let entry = ash::Entry::new().unwrap();
-            let instance = Self::create_instance(&entry, &window);
+            let entry = ash::Entry::new()?;
+            let instance = Self::create_instance(&entry, &window)?;
 
-            let debug_utils_fn = DebugUtils::new(&entry, &instance);
+            let debug_utils_fn = DebugUtils::new(&entry, &*instance);
             let debug_utils_messenger = debug_utils_fn
-                .create_debug_utils_messenger(&Self::debug_utils_messenger_create_info(), None)
-                .unwrap();
+                .create_debug_utils_messenger(&Self::debug_utils_messenger_create_info(), None)?
+                .guard_with(&debug_utils_fn);
 
-            let surface =
-                Mutex::new(ash_window::create_surface(&entry, &instance, &*window, None).unwrap());
-            let surface_fn = Surface::new(&entry, &instance);
+            let surface_fn = Surface::new(&entry, &*instance);
+            let surface = ash_window::create_surface(&entry, &*instance, &*window, None)?
+                .guard_with(&surface_fn);
 
-            Self {
+            Ok(Self {
+                debug_utils_messenger: debug_utils_messenger.take(),
+                instance: instance.take(),
+                surface: Mutex::new(surface.take()),
                 debug_utils_fn,
-                debug_utils_messenger,
                 _entry: entry,
-                instance,
-                surface,
                 surface_fn,
                 window,
-            }
+            })
         }
     }
 
-    unsafe fn create_instance(entry: &ash::Entry, window: &Window) -> ash::Instance {
+    unsafe fn create_instance(
+        entry: &ash::Entry,
+        window: &Window,
+    ) -> Result<Guarded<ash::Instance>, ash::InstanceError> {
         let application_name = CString::new("Nerigen").unwrap();
         let application_version = vk::make_version(
             env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap(),
@@ -62,13 +79,14 @@ impl SharedCrown {
 
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let enabled_layer_names = [validation_layer.as_ptr()];
-        let mut enabled_extension_names =
-            ash_window::enumerate_required_extensions(window).unwrap();
+        let mut enabled_extension_names = ash_window::enumerate_required_extensions(window)
+            .map_err(ash::InstanceError::VkError)?;
         enabled_extension_names.push(DebugUtils::name());
         let enabled_extension_names: Vec<_> = enabled_extension_names
             .into_iter()
             .map(|name| name.as_ptr())
             .collect();
+
         let mut debug_utils_messenger_create_info = Self::debug_utils_messenger_create_info();
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&application_info)
@@ -76,7 +94,7 @@ impl SharedCrown {
             .enabled_extension_names(&enabled_extension_names)
             .push_next(&mut debug_utils_messenger_create_info);
 
-        entry.create_instance(&create_info, None).unwrap()
+        Ok(entry.create_instance(&create_info, None)?.guard())
     }
 
     fn debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXTBuilder<'static> {
@@ -151,8 +169,16 @@ pub struct SharedStem {
     swapchain_fn: Swapchain,
 }
 
+#[derive(Error, Debug)]
+pub enum SharedStemError {
+    #[error("Vulkan error occurred")]
+    VkError(#[from] vk::Result), // TODO: split into contexts
+    #[error("Couldn't select acceptable graphics device")]
+    NoAcceptableDeviceError,
+}
+
 impl SharedStem {
-    pub fn new(crown: Arc<SharedCrown>) -> Self {
+    pub fn new(crown: Arc<SharedCrown>) -> Result<Self, SharedStemError> {
         let instance = crown.instance();
         let surface = crown.surface();
         let surface = surface.lock().unwrap();
@@ -160,38 +186,40 @@ impl SharedStem {
 
         unsafe {
             let (physical_device, device, queues) =
-                Self::create_device_and_queues(instance, surface_fn, *surface);
+                Self::create_device_and_queues(instance, surface_fn, *surface)?;
 
-            let swapchain_fn = Swapchain::new(instance, &device);
+            let swapchain_fn = Swapchain::new(instance, &*device);
 
-            let command_pool = Self::create_command_pool(&device, queues.graphics_family);
-            let command_buffer = Self::allocate_command_buffer(&device, command_pool);
+            let command_pool = Self::create_command_pool(&device, queues.graphics_family)?;
+            let command_buffer = Self::allocate_command_buffer(&device, *command_pool)?;
 
-            let image_acquired_semaphore =
-                device.create_semaphore(&Default::default(), None).unwrap();
-            let render_complete_semaphore =
-                device.create_semaphore(&Default::default(), None).unwrap();
+            let image_acquired_semaphore = device
+                .create_semaphore(&Default::default(), None)?
+                .guard_with(&*device);
+            let render_complete_semaphore = device
+                .create_semaphore(&Default::default(), None)?
+                .guard_with(&*device);
 
             let signaled_fence_create_info =
                 vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
             let presentation_fence = device
-                .create_fence(&signaled_fence_create_info, None)
-                .unwrap();
+                .create_fence(&signaled_fence_create_info, None)?
+                .guard_with(&*device);
 
             drop(surface);
 
-            Self {
+            Ok(Self {
+                command_pool: command_pool.take(),
+                image_acquired_semaphore: image_acquired_semaphore.take(),
+                presentation_fence: presentation_fence.take(),
+                render_complete_semaphore: render_complete_semaphore.take(),
+                device: device.take(),
                 command_buffer,
-                command_pool,
                 crown,
-                device,
-                image_acquired_semaphore,
                 physical_device,
-                presentation_fence,
                 queues,
-                render_complete_semaphore,
                 swapchain_fn,
-            }
+            })
         }
     }
 
@@ -199,9 +227,10 @@ impl SharedStem {
         instance: &ash::Instance,
         surface_fn: &Surface,
         surface: vk::SurfaceKHR,
-    ) -> (vk::PhysicalDevice, ash::Device, Queues) {
+    ) -> Result<(vk::PhysicalDevice, Guarded<ash::Device>, Queues), SharedStemError> {
         let (physical_device, graphics_queue_family, present_queue_family) =
-            Self::select_physical_device_and_queue_families(instance, surface_fn, surface);
+            Self::select_physical_device_and_queue_families(instance, surface_fn, surface)?
+                .ok_or(SharedStemError::NoAcceptableDeviceError)?;
 
         let queue_priorities = [1.0];
         let queue_create_infos = [
@@ -229,8 +258,8 @@ impl SharedStem {
             .enabled_extension_names(&enabled_extension_names)
             .enabled_layer_names(&enabled_layer_names);
         let device = instance
-            .create_device(physical_device, &device_create_info, None)
-            .unwrap();
+            .create_device(physical_device, &device_create_info, None)?
+            .guard();
 
         let queues = Queues {
             graphics: device.get_device_queue(graphics_queue_family, 0),
@@ -239,54 +268,57 @@ impl SharedStem {
             present_family: present_queue_family,
         };
 
-        (physical_device, device, queues)
+        Ok((physical_device, device, queues))
     }
 
     unsafe fn select_physical_device_and_queue_families(
         instance: &ash::Instance,
         surface_fn: &Surface,
         surface: vk::SurfaceKHR,
-    ) -> (vk::PhysicalDevice, u32, u32) {
-        for physical_device in instance.enumerate_physical_devices().unwrap() {
+    ) -> VkResult<Option<(vk::PhysicalDevice, u32, u32)>> {
+        for physical_device in instance.enumerate_physical_devices()? {
             let queue_families =
                 instance.get_physical_device_queue_family_properties(physical_device);
             let graphics_queue = queue_families
                 .iter()
                 .position(|info| info.queue_flags.contains(vk::QueueFlags::GRAPHICS));
-            let present_queue = queue_families.iter().enumerate().position(|(i, _)| {
-                surface_fn
-                    .get_physical_device_surface_support(physical_device, i as _, surface)
-                    .unwrap()
-            });
-            if let (Some(graphics_queue), Some(present_queue)) = (graphics_queue, present_queue) {
-                return (physical_device, graphics_queue as _, present_queue as _);
+
+            for (present_queue, _) in queue_families.iter().enumerate() {
+                let supports_surface = surface_fn.get_physical_device_surface_support(
+                    physical_device,
+                    present_queue as _,
+                    surface,
+                )?;
+                if supports_surface {
+                    return Ok(graphics_queue.map(|graphics_queue| {
+                        (physical_device, graphics_queue as _, present_queue as _)
+                    }));
+                }
             }
         }
-        panic!("No suitable device found");
+        Ok(None)
     }
 
     unsafe fn create_command_pool(
         device: &ash::Device,
         queue_family_index: u32,
-    ) -> vk::CommandPool {
+    ) -> VkResult<Guarded<(vk::CommandPool, &ash::Device)>> {
         let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .queue_family_index(queue_family_index);
-        device
-            .create_command_pool(&command_pool_create_info, None)
-            .unwrap()
+        Ok(device
+            .create_command_pool(&command_pool_create_info, None)?
+            .guard_with(device))
     }
 
     unsafe fn allocate_command_buffer(
         device: &ash::Device,
         command_pool: vk::CommandPool,
-    ) -> vk::CommandBuffer {
+    ) -> VkResult<vk::CommandBuffer> {
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             .command_buffer_count(1);
-        device
-            .allocate_command_buffers(&command_buffer_allocate_info)
-            .unwrap()[0]
+        Ok(device.allocate_command_buffers(&command_buffer_allocate_info)?[0])
     }
 
     pub fn command_buffer(&self) -> vk::CommandBuffer {
@@ -358,12 +390,25 @@ pub struct SharedFrond {
     swapchain_image_views: Vec<vk::ImageView>,
 }
 
+#[derive(Error, Debug)]
+pub enum SharedFrondError {
+    #[error("Vulkan error occurred")]
+    VkError(#[from] vk::Result), // TODO: split into contexts
+    #[error("Couldn't select acceptable surface format")]
+    NoAcceptableSurfaceFormat,
+    #[error("Surface has no area")]
+    NoSurfaceArea,
+}
+
 impl SharedFrond {
-    pub fn new(stem: Arc<SharedStem>) -> Self {
-        Self::_new(stem, None)
+    pub fn new(stem: Arc<SharedStem>) -> Result<Self, SharedFrondError> {
+        Self::_new(stem, vk::SwapchainKHR::null())
     }
 
-    fn _new(stem: Arc<SharedStem>, old_swapchain: Option<SharedFrondSwapchain>) -> Self {
+    fn _new(
+        stem: Arc<SharedStem>,
+        old_swapchain: vk::SwapchainKHR,
+    ) -> Result<Self, SharedFrondError> {
         let device = stem.device();
         let physical_device = stem.physical_device();
         let queues = stem.queues();
@@ -374,16 +419,17 @@ impl SharedFrond {
         let surface = surface.lock().unwrap();
         let surface_fn = crown.surface_fn();
         let resolution = crown.window_resolution();
+        if resolution.width == 0 || resolution.height == 0 {
+            return Err(SharedFrondError::NoSurfaceArea);
+        }
 
         unsafe {
-            let surface_format = Self::select_surface_format(surface_fn, physical_device, *surface);
+            let surface_format =
+                Self::select_surface_format(surface_fn, physical_device, *surface)?
+                    .ok_or(SharedFrondError::NoAcceptableSurfaceFormat)?;
 
-            let render_pass = Self::create_render_pass(&device, surface_format.format);
+            let render_pass = Self::create_render_pass(&device, surface_format.format)?;
 
-            let old_swapchain = old_swapchain
-                .as_ref() // Don't destroy the swapchain before it's used
-                .map(|s| s.swapchain())
-                .unwrap_or_default();
             let swapchain = Self::create_swapchain(
                 surface_fn,
                 swapchain_fn,
@@ -393,26 +439,30 @@ impl SharedFrond {
                 resolution,
                 queues,
                 old_swapchain,
-            );
+            )?;
 
             let swapchain_image_views = Self::create_swapchain_image_views(
                 swapchain_fn,
                 device,
-                swapchain,
+                *swapchain,
                 surface_format.format,
-            );
+            )?;
 
-            let framebuffers =
-                Self::create_framebuffers(device, render_pass, &swapchain_image_views, resolution);
+            let framebuffers = Self::create_framebuffers(
+                device,
+                *render_pass,
+                &swapchain_image_views,
+                resolution,
+            )?;
 
-            Self {
-                framebuffers,
-                render_pass,
+            Ok(Self {
+                render_pass: render_pass.take(),
+                swapchain: swapchain.take(),
+                swapchain_image_views: swapchain_image_views.take(),
+                framebuffers: framebuffers.take(),
                 resolution,
                 stem,
-                swapchain,
-                swapchain_image_views,
-            }
+            })
         }
     }
 
@@ -420,10 +470,9 @@ impl SharedFrond {
         surface_fn: &Surface,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
-    ) -> vk::SurfaceFormatKHR {
-        let surface_formats = surface_fn
-            .get_physical_device_surface_formats(physical_device, surface)
-            .unwrap();
+    ) -> VkResult<Option<vk::SurfaceFormatKHR>> {
+        let surface_formats =
+            surface_fn.get_physical_device_surface_formats(physical_device, surface)?;
         let desired_formats = [
             vk::SurfaceFormatKHR {
                 color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
@@ -431,16 +480,16 @@ impl SharedFrond {
             },
             // TODO: Support other formats?
         ];
-        *desired_formats
+        Ok(desired_formats
             .iter()
             .find(|&&desired_format| surface_formats.iter().any(|&sfmt| sfmt == desired_format))
-            .unwrap()
+            .copied())
     }
 
     unsafe fn create_render_pass(
         device: &ash::Device,
         surface_format: vk::Format,
-    ) -> vk::RenderPass {
+    ) -> VkResult<Guarded<(vk::RenderPass, &ash::Device)>> {
         let attachments = [vk::AttachmentDescription::builder()
             .format(surface_format)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -465,24 +514,23 @@ impl SharedFrond {
             .attachments(&attachments)
             .subpasses(&subpasses)
             .dependencies(&dependencies);
-        device
-            .create_render_pass(&render_pass_create_info, None)
-            .unwrap()
+        Ok(device
+            .create_render_pass(&render_pass_create_info, None)?
+            .guard_with(device))
     }
 
-    unsafe fn create_swapchain(
+    unsafe fn create_swapchain<'a>(
         surface_fn: &Surface,
-        swapchain_fn: &Swapchain,
+        swapchain_fn: &'a Swapchain,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
         surface_format: vk::SurfaceFormatKHR,
         default_resolution: vk::Extent2D,
         queues: &Queues,
         old_swapchain: vk::SwapchainKHR,
-    ) -> vk::SwapchainKHR {
-        let surface_capabilities = surface_fn
-            .get_physical_device_surface_capabilities(physical_device, surface)
-            .unwrap();
+    ) -> VkResult<Guarded<(vk::SwapchainKHR, &'a Swapchain)>> {
+        let surface_capabilities =
+            surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?;
 
         let max_image_count = match surface_capabilities.max_image_count {
             0 => u32::MAX,
@@ -508,8 +556,7 @@ impl SharedFrond {
         };
 
         let present_mode = surface_fn
-            .get_physical_device_surface_present_modes(physical_device, surface)
-            .unwrap()
+            .get_physical_device_surface_present_modes(physical_device, surface)?
             .into_iter()
             .find(|&m| m == vk::PresentModeKHR::MAILBOX)
             .unwrap_or(vk::PresentModeKHR::FIFO);
@@ -538,17 +585,17 @@ impl SharedFrond {
             .clipped(true)
             .old_swapchain(old_swapchain);
 
-        swapchain_fn
-            .create_swapchain(&swapchain_create_info, None)
-            .unwrap()
+        Ok(swapchain_fn
+            .create_swapchain(&swapchain_create_info, None)?
+            .guard_with(swapchain_fn))
     }
 
-    unsafe fn create_swapchain_image_views(
+    unsafe fn create_swapchain_image_views<'a>(
         swapchain_fn: &Swapchain,
-        device: &ash::Device,
+        device: &'a ash::Device,
         swapchain: vk::SwapchainKHR,
         format: vk::Format,
-    ) -> Vec<vk::ImageView> {
+    ) -> VkResult<Guarded<(Vec<vk::ImageView>, &'a ash::Device)>> {
         let subresource_range = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
@@ -557,44 +604,37 @@ impl SharedFrond {
             .layer_count(1)
             .build();
 
-        swapchain_fn
-            .get_swapchain_images(swapchain)
-            .unwrap()
-            .iter()
-            .map(|image| {
-                let image_view_create_info = vk::ImageViewCreateInfo::builder()
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(subresource_range)
-                    .image(*image);
-                device
-                    .create_image_view(&image_view_create_info, None)
-                    .unwrap()
-            })
-            .collect()
+        let mut image_views = Vec::<vk::ImageView>::new().guard_with(device);
+        for image in swapchain_fn.get_swapchain_images(swapchain)? {
+            let image_view_create_info = vk::ImageViewCreateInfo::builder()
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(subresource_range)
+                .image(image);
+            image_views.push(device.create_image_view(&image_view_create_info, None)?);
+        }
+
+        Ok(image_views)
     }
 
-    unsafe fn create_framebuffers(
-        device: &ash::Device,
+    unsafe fn create_framebuffers<'a>(
+        device: &'a ash::Device,
         render_pass: vk::RenderPass,
         image_views: &[vk::ImageView],
         resolution: vk::Extent2D,
-    ) -> Vec<vk::Framebuffer> {
-        image_views
-            .iter()
-            .map(|&image_view| {
-                let attachments = [image_view];
-                let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                    .render_pass(render_pass)
-                    .attachments(&attachments)
-                    .width(resolution.width)
-                    .height(resolution.height)
-                    .layers(1);
-                device
-                    .create_framebuffer(&framebuffer_create_info, None)
-                    .unwrap()
-            })
-            .collect()
+    ) -> VkResult<Guarded<(Vec<vk::Framebuffer>, &'a ash::Device)>> {
+        let mut framebuffers = Vec::<vk::Framebuffer>::new().guard_with(device);
+        for &image_view in image_views {
+            let attachments = [image_view];
+            let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+                .render_pass(render_pass)
+                .attachments(&attachments)
+                .width(resolution.width)
+                .height(resolution.height)
+                .layers(1);
+            framebuffers.push(device.create_framebuffer(&framebuffer_create_info, None)?)
+        }
+        Ok(framebuffers)
     }
 
     pub fn take_swapchain(mut self) -> SharedFrondSwapchain {
@@ -650,13 +690,12 @@ pub struct SharedFrondSwapchain {
 }
 
 impl SharedFrondSwapchain {
-    pub fn ressurect(self) -> Result<SharedFrond, SharedFrondSwapchain> {
-        let resolution = self.stem.crown().window_resolution();
-        if resolution.width > 0 && resolution.height > 0 {
-            Ok(SharedFrond::_new(self.stem.clone(), Some(self)))
-        } else {
-            Err(self)
-        }
+    pub fn ressurect(self) -> Result<SharedFrond, (SharedFrondSwapchain, SharedFrondError)> {
+        SharedFrond::_new(self.stem.clone(), self.swapchain).map_err(|err| (self, err))
+    }
+
+    pub fn stem(&self) -> Arc<SharedStem> {
+        self.stem.clone()
     }
 
     pub fn swapchain(&self) -> vk::SwapchainKHR {

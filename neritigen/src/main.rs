@@ -18,7 +18,7 @@ fn main() {
         .unwrap();
     let window = Arc::new(window);
 
-    let mut renderer = Renderer::new(window.clone());
+    let mut renderer = Renderer::new(window.clone()).unwrap();
 
     event_loop.run(move |event, _event_loop_target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -37,7 +37,7 @@ fn main() {
                 window.request_redraw();
             }
             Event::RedrawRequested(window_id) if window_id == window.id() => {
-                renderer.draw();
+                renderer.draw().unwrap();
             }
             _ => (),
         }
