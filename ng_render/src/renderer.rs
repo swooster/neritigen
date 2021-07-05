@@ -124,7 +124,7 @@ impl Renderer {
 
                 let clear_values = [vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [0.0, 1.0, 0.25, 1.0],
+                        float32: [0.0, 0.0, 0.0, 1.0],
                     },
                 }];
 
@@ -142,6 +142,20 @@ impl Renderer {
                     command_buffer,
                     &render_pass_begin_info,
                     vk::SubpassContents::INLINE,
+                );
+
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    frond.pipeline(),
+                );
+
+                device.cmd_draw(
+                    command_buffer,
+                    3, // vertices
+                    1, // instances
+                    0, // first vertex
+                    0, // first instance
                 );
 
                 device.cmd_end_render_pass(command_buffer);

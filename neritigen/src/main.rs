@@ -13,7 +13,7 @@ fn main() {
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("Hello, blank window!")
+        .with_title("Hello, triangle!")
         .build(&event_loop)
         .unwrap();
     let window = Arc::new(window);

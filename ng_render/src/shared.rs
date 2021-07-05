@@ -9,6 +9,7 @@ use ash::{
     vk,
 };
 use thiserror::Error;
+use vk_shader_macros::include_glsl;
 use winit::window::Window;
 
 use crate::guard::{GuardableResource, Guarded};
@@ -383,11 +384,15 @@ pub struct Queues {
 
 pub struct SharedFrond {
     framebuffers: Vec<vk::Framebuffer>,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
     resolution: vk::Extent2D,
     stem: Arc<SharedStem>,
     swapchain: vk::SwapchainKHR,
     swapchain_image_views: Vec<vk::ImageView>,
+    triangle_frag_shader_module: vk::ShaderModule,
+    triangle_vert_shader_module: vk::ShaderModule,
 }
 
 #[derive(Error, Debug)]
@@ -430,6 +435,22 @@ impl SharedFrond {
 
             let render_pass = Self::create_render_pass(device, surface_format.format)?;
 
+            let triangle_vert_shader_module =
+                Self::create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
+            let triangle_frag_shader_module =
+                Self::create_shader_module(device, include_glsl!("shaders/triangle.frag"))?;
+            let pipeline_layout = device
+                .create_pipeline_layout(&Default::default(), None)?
+                .guard_with(device);
+            let pipeline = Self::create_pipeline(
+                device,
+                *triangle_vert_shader_module,
+                *triangle_frag_shader_module,
+                resolution,
+                *pipeline_layout,
+                *render_pass,
+            )?;
+
             let swapchain =
                 Self::create_swapchain(&stem, surface_format, resolution, old_swapchain)?;
 
@@ -448,10 +469,14 @@ impl SharedFrond {
             )?;
 
             Ok(Self {
+                pipeline: pipeline.take(),
+                pipeline_layout: pipeline_layout.take(),
                 render_pass: render_pass.take(),
                 swapchain: swapchain.take(),
                 swapchain_image_views: swapchain_image_views.take(),
                 framebuffers: framebuffers.take(),
+                triangle_frag_shader_module: triangle_frag_shader_module.take(),
+                triangle_vert_shader_module: triangle_vert_shader_module.take(),
                 resolution,
                 stem,
             })
@@ -509,6 +534,97 @@ impl SharedFrond {
         Ok(device
             .create_render_pass(&render_pass_create_info, None)?
             .guard_with(device))
+    }
+
+    unsafe fn create_shader_module<'a>(
+        device: &'a ash::Device,
+        spirv: &[u32],
+    ) -> VkResult<Guarded<(vk::ShaderModule, &'a ash::Device)>> {
+        let shader_module_create_info = vk::ShaderModuleCreateInfo::builder().code(spirv);
+        let shader_module = device.create_shader_module(&shader_module_create_info, None)?;
+        Ok(shader_module.guard_with(device))
+    }
+
+    unsafe fn create_pipeline(
+        device: &ash::Device,
+        triangle_vert_shader_module: vk::ShaderModule,
+        triangle_frag_shader_module: vk::ShaderModule,
+        resolution: vk::Extent2D,
+        pipeline_layout: vk::PipelineLayout,
+        render_pass: vk::RenderPass,
+    ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
+        let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(triangle_vert_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::VERTEX);
+        let frag_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(triangle_frag_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::FRAGMENT);
+        let shader_stages = [*vert_create_info, *frag_create_info];
+
+        let vertex_input_state = Default::default();
+
+        let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: resolution.width as _,
+            height: resolution.height as _,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: resolution,
+        }];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        let rasterization_state = vk::PipelineRasterizationStateCreateInfo::builder()
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0);
+
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let attachments = [vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::all(),
+            ..Default::default()
+        }];
+        let color_blend_state =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
+
+        let graphics_pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly_state)
+            // .tesselation_state()
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization_state)
+            .multisample_state(&multisample_state)
+            //.depth_stencil_state()
+            .color_blend_state(&color_blend_state)
+            // .dynamic_state()
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0)
+            .build()];
+
+        let mut pipelines = device
+            .create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &graphics_pipeline_create_infos,
+                None,
+            )
+            .map_err(|(_, err)| err)?;
+
+        Ok(pipelines.pop().unwrap().guard_with(device))
     }
 
     unsafe fn create_swapchain(
@@ -643,6 +759,10 @@ impl SharedFrond {
         &self.framebuffers
     }
 
+    pub fn pipeline(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+
     pub fn render_pass(&self) -> vk::RenderPass {
         self.render_pass
     }
@@ -674,6 +794,10 @@ impl Drop for SharedFrond {
                 device.destroy_image_view(image_view, None);
             }
             swapchain_fn.destroy_swapchain(self.swapchain, None);
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
+            device.destroy_shader_module(self.triangle_frag_shader_module, None);
+            device.destroy_shader_module(self.triangle_vert_shader_module, None);
             device.destroy_render_pass(self.render_pass, None);
         }
     }
