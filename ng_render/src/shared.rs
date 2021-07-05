@@ -402,47 +402,39 @@ pub enum SharedFrondError {
 
 impl SharedFrond {
     pub fn new(stem: Arc<SharedStem>) -> Result<Self, SharedFrondError> {
-        Self::_new(stem, vk::SwapchainKHR::null())
+        Self::new_with_swapchain(stem, vk::SwapchainKHR::null())
     }
 
-    fn _new(
+    fn new_with_swapchain(
         stem: Arc<SharedStem>,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Self, SharedFrondError> {
-        let device = stem.device();
-        let physical_device = stem.physical_device();
-        let queues = stem.queues();
-        let swapchain_fn = stem.swapchain_fn();
-
         let crown = stem.crown();
-        let surface = crown.surface();
-        let surface = surface.lock().unwrap();
-        let surface_fn = crown.surface_fn();
+        let device = stem.device();
+
         let resolution = crown.window_resolution();
         if resolution.width == 0 || resolution.height == 0 {
             return Err(SharedFrondError::NoSurfaceArea);
         }
 
         unsafe {
-            let surface_format =
+            let surface_format = {
+                let physical_device = stem.physical_device();
+
+                let surface = crown.surface();
+                let surface = surface.lock().unwrap();
+                let surface_fn = crown.surface_fn();
                 Self::select_surface_format(surface_fn, physical_device, *surface)?
-                    .ok_or(SharedFrondError::NoAcceptableSurfaceFormat)?;
+                    .ok_or(SharedFrondError::NoAcceptableSurfaceFormat)?
+            };
 
-            let render_pass = Self::create_render_pass(&device, surface_format.format)?;
+            let render_pass = Self::create_render_pass(device, surface_format.format)?;
 
-            let swapchain = Self::create_swapchain(
-                surface_fn,
-                swapchain_fn,
-                physical_device,
-                *surface,
-                surface_format,
-                resolution,
-                queues,
-                old_swapchain,
-            )?;
+            let swapchain =
+                Self::create_swapchain(&stem, surface_format, resolution, old_swapchain)?;
 
             let swapchain_image_views = Self::create_swapchain_image_views(
-                swapchain_fn,
+                stem.swapchain_fn(),
                 device,
                 *swapchain,
                 surface_format.format,
@@ -519,18 +511,21 @@ impl SharedFrond {
             .guard_with(device))
     }
 
-    unsafe fn create_swapchain<'a>(
-        surface_fn: &Surface,
-        swapchain_fn: &'a Swapchain,
-        physical_device: vk::PhysicalDevice,
-        surface: vk::SurfaceKHR,
+    unsafe fn create_swapchain(
+        stem: &SharedStem,
         surface_format: vk::SurfaceFormatKHR,
         default_resolution: vk::Extent2D,
-        queues: &Queues,
         old_swapchain: vk::SwapchainKHR,
-    ) -> VkResult<Guarded<(vk::SwapchainKHR, &'a Swapchain)>> {
+    ) -> VkResult<Guarded<(vk::SwapchainKHR, &Swapchain)>> {
+        let crown = stem.crown();
+        let physical_device = stem.physical_device();
+        let queues = stem.queues();
+        let surface_fn = crown.surface_fn();
+        let swapchain_fn = stem.swapchain_fn();
+        let surface = crown.surface().lock().unwrap();
+
         let surface_capabilities =
-            surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?;
+            surface_fn.get_physical_device_surface_capabilities(physical_device, *surface)?;
 
         let max_image_count = match surface_capabilities.max_image_count {
             0 => u32::MAX,
@@ -556,7 +551,7 @@ impl SharedFrond {
         };
 
         let present_mode = surface_fn
-            .get_physical_device_surface_present_modes(physical_device, surface)?
+            .get_physical_device_surface_present_modes(physical_device, *surface)?
             .into_iter()
             .find(|&m| m == vk::PresentModeKHR::MAILBOX)
             .unwrap_or(vk::PresentModeKHR::FIFO);
@@ -570,7 +565,7 @@ impl SharedFrond {
             };
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
-            .surface(surface)
+            .surface(*surface)
             .min_image_count(min_image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
@@ -691,7 +686,8 @@ pub struct SharedFrondSwapchain {
 
 impl SharedFrondSwapchain {
     pub fn ressurect(self) -> Result<SharedFrond, (SharedFrondSwapchain, SharedFrondError)> {
-        SharedFrond::_new(self.stem.clone(), self.swapchain).map_err(|err| (self, err))
+        SharedFrond::new_with_swapchain(self.stem.clone(), self.swapchain)
+            .map_err(|err| (self, err))
     }
 
     pub fn stem(&self) -> Arc<SharedStem> {
