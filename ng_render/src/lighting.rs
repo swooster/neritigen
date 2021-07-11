@@ -10,14 +10,14 @@ use crate::{
     util,
 };
 
-pub struct TonemappingStem {
+pub struct LightingStem {
     descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     shared_stem: Arc<SharedStem>,
     frag_shader_module: vk::ShaderModule,
 }
 
-impl TonemappingStem {
+impl LightingStem {
     pub fn new(shared_stem: Arc<SharedStem>) -> VkResult<Self> {
         unsafe {
             let device = shared_stem.device();
@@ -27,7 +27,7 @@ impl TonemappingStem {
             let pipeline_layout = Self::create_pipeline_layout(device, *descriptor_set_layout)?;
 
             let frag_shader_module =
-                util::create_shader_module(device, include_glsl!("shaders/tonemapping.frag"))?;
+                util::create_shader_module(device, include_glsl!("shaders/lighting.frag"))?;
 
             Ok(Self {
                 descriptor_set_layout: descriptor_set_layout.take(),
@@ -56,9 +56,9 @@ impl TonemappingStem {
 
     unsafe fn create_pipeline_layout(
         device: &ash::Device,
-        input_attachments_descriptor_set_layout: vk::DescriptorSetLayout,
+        descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> VkResult<Guarded<(vk::PipelineLayout, &ash::Device)>> {
-        let set_layouts = [input_attachments_descriptor_set_layout];
+        let set_layouts = [descriptor_set_layout];
         let pipeline_layout_create_info =
             vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
         Ok(device
@@ -67,7 +67,7 @@ impl TonemappingStem {
     }
 }
 
-impl Drop for TonemappingStem {
+impl Drop for LightingStem {
     fn drop(&mut self) {
         unsafe {
             let device = self.shared_stem.device();
@@ -80,22 +80,19 @@ impl Drop for TonemappingStem {
     }
 }
 
-pub struct TonemappingFrond {
+pub struct LightingFrond {
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
-    framebuffers: Vec<vk::Framebuffer>,
+    framebuffer: vk::Framebuffer,
     pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
     shared_frond: Arc<SharedFrond>,
-    tonemapping_stem: Arc<TonemappingStem>,
+    lighting_stem: Arc<LightingStem>,
 }
 
-impl TonemappingFrond {
-    pub fn new(
-        tonemapping_stem: Arc<TonemappingStem>,
-        shared_frond: Arc<SharedFrond>,
-    ) -> VkResult<Self> {
-        tonemapping_stem.shared_stem.assert_is(&shared_frond.stem());
+impl LightingFrond {
+    pub fn new(lighting_stem: Arc<LightingStem>, shared_frond: Arc<SharedFrond>) -> VkResult<Self> {
+        lighting_stem.shared_stem.assert_is(&shared_frond.stem());
         unsafe {
             let device = shared_frond.device();
 
@@ -111,41 +108,41 @@ impl TonemappingFrond {
             let descriptor_set = Self::allocate_descriptor_set(
                 device,
                 *descriptor_pool,
-                tonemapping_stem.descriptor_set_layout,
-                shared_frond.light().view,
+                lighting_stem.descriptor_set_layout,
+                shared_frond.diffuse().view,
             )?;
 
             let render_pass = Self::create_render_pass(
                 device,
+                shared_frond.diffuse().format,
                 shared_frond.light().format,
-                shared_frond.swapchain_format(),
             )?;
 
             let pipeline = Self::create_pipeline(
                 device,
                 shared_frond.stem().fullscreen_vert_shader_module(),
-                tonemapping_stem.frag_shader_module,
+                lighting_stem.frag_shader_module,
                 shared_frond.resolution(),
-                tonemapping_stem.pipeline_layout,
+                lighting_stem.pipeline_layout,
                 *render_pass,
             )?;
 
-            let framebuffers = Self::create_framebuffers(
+            let framebuffer = Self::create_framebuffer(
                 device,
                 *render_pass,
+                shared_frond.diffuse().view,
                 shared_frond.light().view,
-                shared_frond.swapchain_image_views(),
                 shared_frond.resolution(),
             )?;
 
             Ok(Self {
                 descriptor_pool: descriptor_pool.take(),
-                framebuffers: framebuffers.take(),
+                framebuffer: framebuffer.take(),
                 pipeline: pipeline.take(),
                 render_pass: render_pass.take(),
                 descriptor_set,
                 shared_frond,
-                tonemapping_stem,
+                lighting_stem,
             })
         }
     }
@@ -154,7 +151,7 @@ impl TonemappingFrond {
         device: &ash::Device,
         descriptor_pool: vk::DescriptorPool,
         descriptor_set_layout: vk::DescriptorSetLayout,
-        light_view: vk::ImageView,
+        diffuse_view: vk::ImageView,
     ) -> VkResult<vk::DescriptorSet> {
         let set_layouts = [descriptor_set_layout];
         let allocate_info = vk::DescriptorSetAllocateInfo::builder()
@@ -164,7 +161,7 @@ impl TonemappingFrond {
 
         let image_info = [vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
-            image_view: light_view,
+            image_view: diffuse_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let descriptor_writes = [vk::WriteDescriptorSet::builder()
@@ -181,12 +178,12 @@ impl TonemappingFrond {
 
     unsafe fn create_render_pass(
         device: &ash::Device,
+        diffuse_format: vk::Format,
         light_format: vk::Format,
-        swapchain_format: vk::Format,
     ) -> VkResult<Guarded<(vk::RenderPass, &ash::Device)>> {
         let attachments = [
             vk::AttachmentDescription::builder()
-                .format(light_format)
+                .format(diffuse_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::LOAD)
                 .store_op(vk::AttachmentStoreOp::DONT_CARE)
@@ -194,12 +191,12 @@ impl TonemappingFrond {
                 .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .build(),
             vk::AttachmentDescription::builder()
-                .format(swapchain_format)
+                .format(light_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .build(),
         ];
 
@@ -317,28 +314,26 @@ impl TonemappingFrond {
         Ok(pipelines.pop().unwrap().guard_with(device))
     }
 
-    unsafe fn create_framebuffers<'a>(
-        device: &'a ash::Device,
+    unsafe fn create_framebuffer(
+        device: &ash::Device,
         render_pass: vk::RenderPass,
+        diffuse_view: vk::ImageView,
         light_view: vk::ImageView,
-        image_views: &[vk::ImageView],
         resolution: vk::Extent2D,
-    ) -> VkResult<Guarded<(Vec<vk::Framebuffer>, &'a ash::Device)>> {
-        let mut framebuffers = Vec::<vk::Framebuffer>::new().guard_with(device);
-        for &image_view in image_views {
-            let attachments = [light_view, image_view];
-            let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                .render_pass(render_pass)
-                .attachments(&attachments)
-                .width(resolution.width)
-                .height(resolution.height)
-                .layers(1);
-            framebuffers.push(device.create_framebuffer(&framebuffer_create_info, None)?)
-        }
-        Ok(framebuffers)
+    ) -> VkResult<Guarded<(vk::Framebuffer, &ash::Device)>> {
+        let attachments = [diffuse_view, light_view];
+        let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+            .render_pass(render_pass)
+            .attachments(&attachments)
+            .width(resolution.width)
+            .height(resolution.height)
+            .layers(1);
+        Ok(device
+            .create_framebuffer(&framebuffer_create_info, None)?
+            .guard_with(device))
     }
 
-    pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer, image_index: u32) {
+    pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer) {
         let device = self.shared_frond.device();
 
         let render_area = vk::Rect2D {
@@ -350,7 +345,7 @@ impl TonemappingFrond {
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)
-            .framebuffer(self.framebuffers[image_index as usize])
+            .framebuffer(self.framebuffer)
             .render_area(render_area)
             .clear_values(&clear_values);
         device.cmd_begin_render_pass(
@@ -368,7 +363,7 @@ impl TonemappingFrond {
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
-            self.tonemapping_stem.pipeline_layout,
+            self.lighting_stem.pipeline_layout,
             0,
             &[self.descriptor_set],
             &[],
@@ -386,15 +381,13 @@ impl TonemappingFrond {
     }
 }
 
-impl Drop for TonemappingFrond {
+impl Drop for LightingFrond {
     fn drop(&mut self) {
         unsafe {
             let device = self.shared_frond.device();
             let _ = device.device_wait_idle();
 
-            for &framebuffer in self.framebuffers.iter() {
-                device.destroy_framebuffer(framebuffer, None);
-            }
+            device.destroy_framebuffer(self.framebuffer, None);
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_render_pass(self.render_pass, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);

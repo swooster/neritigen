@@ -9,9 +9,14 @@ use ash::{
     vk,
 };
 use thiserror::Error;
+use vk_shader_macros::include_glsl;
 use winit::window::Window;
 
-use crate::guard::{GuardableResource, Guarded};
+use crate::{
+    guard::{GuardableResource, Guarded},
+    image::Image,
+    util::create_shader_module,
+};
 
 pub struct SharedCrown {
     debug_utils_fn: DebugUtils,
@@ -161,8 +166,10 @@ pub struct SharedStem {
     command_pool: vk::CommandPool,
     crown: Arc<SharedCrown>,
     device: ash::Device,
+    fullscreen_vert_shader_module: vk::ShaderModule,
     image_acquired_semaphore: vk::Semaphore,
     physical_device: vk::PhysicalDevice,
+    physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     presentation_fence: vk::Fence,
     queues: Queues,
     render_complete_semaphore: vk::Semaphore,
@@ -206,10 +213,17 @@ impl SharedStem {
                 .create_fence(&signaled_fence_create_info, None)?
                 .guard_with(&*device);
 
+            let physical_device_memory_properties =
+                instance.get_physical_device_memory_properties(physical_device);
+
+            let fullscreen_vert_shader_module =
+                create_shader_module(&device, include_glsl!("shaders/fullscreen.vert"))?;
+
             drop(surface);
 
             Ok(Self {
                 command_pool: command_pool.take(),
+                fullscreen_vert_shader_module: fullscreen_vert_shader_module.take(),
                 image_acquired_semaphore: image_acquired_semaphore.take(),
                 presentation_fence: presentation_fence.take(),
                 render_complete_semaphore: render_complete_semaphore.take(),
@@ -217,6 +231,7 @@ impl SharedStem {
                 command_buffer,
                 crown,
                 physical_device,
+                physical_device_memory_properties,
                 queues,
                 swapchain_fn,
             })
@@ -327,6 +342,22 @@ impl SharedStem {
         }
     }
 
+    pub fn select_memory_type(
+        &self,
+        memory_requirements: vk::MemoryRequirements,
+        required_flags: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let memory_properties = self.physical_device_memory_properties;
+        memory_properties.memory_types[..memory_properties.memory_type_count as _]
+            .iter()
+            .enumerate()
+            .find(|(index, memory_type)| {
+                (1 << index) & memory_requirements.memory_type_bits != 0
+                    && memory_type.property_flags & required_flags == required_flags
+            })
+            .map(|(index, _)| index as _)
+    }
+
     pub fn command_buffer(&self) -> vk::CommandBuffer {
         self.command_buffer
     }
@@ -337,6 +368,10 @@ impl SharedStem {
 
     pub fn device(&self) -> &ash::Device {
         &self.device
+    }
+
+    pub fn fullscreen_vert_shader_module(&self) -> vk::ShaderModule {
+        self.fullscreen_vert_shader_module
     }
 
     pub fn image_acquired_semaphore(&self) -> vk::Semaphore {
@@ -367,15 +402,15 @@ impl SharedStem {
 impl Drop for SharedStem {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.device.device_wait_idle();
+            let device = &self.device;
+            let _ = device.device_wait_idle();
 
-            self.device.destroy_fence(self.presentation_fence, None);
-            self.device
-                .destroy_semaphore(self.image_acquired_semaphore, None);
-            self.device
-                .destroy_semaphore(self.render_complete_semaphore, None);
-            self.device.destroy_command_pool(self.command_pool, None);
-            self.device.destroy_device(None);
+            device.destroy_shader_module(self.fullscreen_vert_shader_module, None);
+            device.destroy_fence(self.presentation_fence, None);
+            device.destroy_semaphore(self.image_acquired_semaphore, None);
+            device.destroy_semaphore(self.render_complete_semaphore, None);
+            device.destroy_command_pool(self.command_pool, None);
+            device.destroy_device(None);
         }
     }
 }
@@ -388,6 +423,8 @@ pub struct Queues {
 }
 
 pub struct SharedFrond {
+    diffuse: Image,
+    light: Image,
     resolution: vk::Extent2D,
     stem: Arc<SharedStem>,
     swapchain: vk::SwapchainKHR,
@@ -401,6 +438,8 @@ pub enum SharedFrondError {
     VkError(#[from] vk::Result), // TODO: split into contexts
     #[error("Couldn't select acceptable surface format")]
     NoAcceptableSurfaceFormat,
+    #[error("Couldn't select acceptable memory type for {0:?} and {1:?}")]
+    NoAcceptableMeoryType(vk::MemoryRequirements, vk::MemoryPropertyFlags),
     #[error("Surface has no area")]
     NoSurfaceArea,
 }
@@ -447,7 +486,25 @@ impl SharedFrond {
                 surface_format.format,
             )?;
 
+            let diffuse = Self::create_image(
+                &stem,
+                resolution,
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+
+            let light = Self::create_image(
+                &stem,
+                resolution,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+
             Ok(Self {
+                diffuse: diffuse.take(),
+                light: light.take(),
                 swapchain: std::mem::take(swapchain),
                 swapchain_image_views: swapchain_image_views.take(),
                 resolution,
@@ -576,6 +633,48 @@ impl SharedFrond {
         Ok(image_views)
     }
 
+    unsafe fn create_image(
+        stem: &SharedStem,
+        resolution: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspects: vk::ImageAspectFlags,
+    ) -> Result<Guarded<(Image, &ash::Device)>, SharedFrondError> {
+        let select_device_local_memory = |memory_requirements: vk::MemoryRequirements| {
+            stem.select_memory_type(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .ok_or(SharedFrondError::NoAcceptableMeoryType(
+                    memory_requirements,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                ))
+        };
+
+        let queue_family_indices = [stem.queues().graphics_family];
+
+        let image_create_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution.width,
+                height: resolution.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        Image::new(
+            stem.device(),
+            &image_create_info,
+            select_device_local_memory,
+            aspects,
+        )?
+    }
+
     pub fn take_swapchain(mut self) -> SharedFrondSwapchain {
         SharedFrondSwapchain {
             stem: self.stem.clone(),
@@ -589,6 +688,14 @@ impl SharedFrond {
 
     pub fn device(&self) -> &ash::Device {
         self.stem.device()
+    }
+
+    pub fn diffuse(&self) -> &Image {
+        &self.diffuse
+    }
+
+    pub fn light(&self) -> &Image {
+        &self.light
     }
 
     pub fn resolution(&self) -> vk::Extent2D {
@@ -619,6 +726,8 @@ impl Drop for SharedFrond {
         unsafe {
             let _ = device.device_wait_idle();
 
+            self.light.destroy_with(device);
+            self.diffuse.destroy_with(device);
             for &image_view in self.swapchain_image_views.iter() {
                 device.destroy_image_view(image_view, None);
             }

@@ -4,11 +4,15 @@ use ash::{prelude::VkResult, version::DeviceV1_0, vk};
 use thiserror::Error;
 use winit::window::Window;
 
-use crate::shared::{
-    SharedCrown, SharedCrownError, SharedFrond, SharedFrondError, SharedFrondSwapchain, SharedStem,
-    SharedStemError,
+use crate::{
+    geometry::{GeometryFrond, GeometryStem},
+    lighting::{LightingFrond, LightingStem},
+    shared::{
+        SharedCrown, SharedCrownError, SharedFrond, SharedFrondError, SharedFrondSwapchain,
+        SharedStem, SharedStemError,
+    },
+    tonemapping::{TonemappingFrond, TonemappingStem},
 };
-use crate::tonemapping::{TonemappingFrond, TonemappingStem};
 
 #[derive(Error, Debug)]
 pub enum RendererError {
@@ -102,6 +106,8 @@ impl RendererCrown {
 }
 
 struct RendererStem {
+    geometry: Arc<GeometryStem>,
+    lighting: Arc<LightingStem>,
     shared: Arc<SharedStem>,
     tonemapping: Arc<TonemappingStem>,
 }
@@ -109,9 +115,13 @@ struct RendererStem {
 impl RendererStem {
     fn new(crown: &RendererCrown) -> Result<Self, RendererError> {
         let shared = Arc::new(SharedStem::new(crown.shared.clone())?);
+        let geometry = Arc::new(GeometryStem::new(shared.clone())?);
+        let lighting = Arc::new(LightingStem::new(shared.clone())?);
         let tonemapping = Arc::new(TonemappingStem::new(shared.clone())?);
 
         Ok(Self {
+            geometry,
+            lighting,
             shared,
             tonemapping,
         })
@@ -119,6 +129,8 @@ impl RendererStem {
 }
 
 struct RendererFrond {
+    geometry: Arc<GeometryFrond>,
+    lighting: Arc<LightingFrond>,
     shared: Arc<SharedFrond>,
     tonemapping: Arc<TonemappingFrond>,
 }
@@ -154,12 +166,16 @@ impl RendererFrond {
         stem: &RendererStem,
         shared: Arc<SharedFrond>,
     ) -> Result<Self, RendererError> {
+        let geometry = Arc::new(GeometryFrond::new(stem.geometry.clone(), shared.clone())?);
+        let lighting = Arc::new(LightingFrond::new(stem.lighting.clone(), shared.clone())?);
         let tonemapping = Arc::new(TonemappingFrond::new(
             stem.tonemapping.clone(),
             shared.clone(),
         )?);
 
         Ok(Self {
+            geometry,
+            lighting,
             shared,
             tonemapping,
         })
@@ -168,7 +184,6 @@ impl RendererFrond {
     unsafe fn draw(&self) -> VkResult<bool> {
         let frond = &self.shared;
 
-        let resolution = frond.resolution();
         let swapchain = frond.swapchain();
 
         let stem = frond.stem();
@@ -199,13 +214,9 @@ impl RendererFrond {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
 
-        let render_area = vk::Rect2D {
-            offset: Default::default(),
-            extent: resolution,
-        };
-
-        self.tonemapping
-            .draw(command_buffer, render_area, image_index);
+        self.geometry.draw(command_buffer);
+        self.lighting.draw(command_buffer);
+        self.tonemapping.draw(command_buffer, image_index);
 
         device.end_command_buffer(command_buffer)?;
 
@@ -235,10 +246,12 @@ impl RendererFrond {
 
     fn take_swapchain(self) -> SharedFrondSwapchain {
         let Self {
+            geometry,
+            lighting,
             shared,
             tonemapping,
         } = self;
-        drop(tonemapping);
+        drop((geometry, lighting, tonemapping));
         match Arc::try_unwrap(shared) {
             Ok(shared) => shared.take_swapchain(),
             _ => panic!("Cannot take swapchain from SharedFrond as something is holding onto it."),

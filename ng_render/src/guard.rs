@@ -164,6 +164,8 @@ define_guardable!(
 define_guardable!(vk::SurfaceKHR, khr::Surface, destroy_surface);
 define_guardable!(vk::SwapchainKHR, khr::Swapchain, destroy_swapchain);
 define_guardable!(vk::CommandPool, ash::Device, destroy_command_pool);
+define_guardable!(vk::DescriptorPool, ash::Device, destroy_descriptor_pool);
+define_guardable!(vk::DescriptorSetLayout, ash::Device, destroy_descriptor_set_layout);
 define_guardable!(vk::DeviceMemory, ash::Device, free_memory);
 define_guardable!(vk::Fence, ash::Device, destroy_fence);
 define_guardable!(vk::Framebuffer, ash::Device, destroy_framebuffer);
