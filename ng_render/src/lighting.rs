@@ -23,11 +23,14 @@ impl LightingStem {
             let device = shared_stem.device();
 
             let descriptor_set_layout = Self::create_descriptor_set_layout(device)?;
+            shared_stem.set_name(*descriptor_set_layout, "lighting")?;
 
             let pipeline_layout = Self::create_pipeline_layout(device, *descriptor_set_layout)?;
+            shared_stem.set_name(*pipeline_layout, "lighting")?;
 
             let frag_shader_module =
                 util::create_shader_module(device, include_glsl!("shaders/lighting.frag"))?;
+            shared_stem.set_name(*frag_shader_module, "lighting frag")?;
 
             Ok(Self {
                 descriptor_set_layout: descriptor_set_layout.take(),
@@ -92,7 +95,8 @@ pub struct LightingFrond {
 
 impl LightingFrond {
     pub fn new(lighting_stem: Arc<LightingStem>, shared_frond: Arc<SharedFrond>) -> VkResult<Self> {
-        lighting_stem.shared_stem.assert_is(&shared_frond.stem());
+        let shared_stem = &lighting_stem.shared_stem;
+        shared_stem.assert_is(&shared_frond.stem());
         unsafe {
             let device = shared_frond.device();
 
@@ -104,6 +108,7 @@ impl LightingFrond {
                     descriptor_count: 1,
                 }],
             )?;
+            shared_stem.set_name(*descriptor_pool, "lighting")?;
 
             let descriptor_set = Self::allocate_descriptor_set(
                 device,
@@ -111,12 +116,14 @@ impl LightingFrond {
                 lighting_stem.descriptor_set_layout,
                 shared_frond.diffuse().view,
             )?;
+            shared_stem.set_name(descriptor_set, "lighting")?;
 
             let render_pass = Self::create_render_pass(
                 device,
                 shared_frond.diffuse().format,
                 shared_frond.light().format,
             )?;
+            shared_stem.set_name(*render_pass, "lighting")?;
 
             let pipeline = Self::create_pipeline(
                 device,
@@ -126,6 +133,7 @@ impl LightingFrond {
                 lighting_stem.pipeline_layout,
                 *render_pass,
             )?;
+            shared_stem.set_name(*pipeline, "lighting")?;
 
             let framebuffer = Self::create_framebuffer(
                 device,
@@ -134,6 +142,7 @@ impl LightingFrond {
                 shared_frond.light().view,
                 shared_frond.resolution(),
             )?;
+            shared_stem.set_name(*framebuffer, "lighting")?;
 
             Ok(Self {
                 descriptor_pool: descriptor_pool.take(),

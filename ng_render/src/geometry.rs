@@ -25,11 +25,14 @@ impl GeometryStem {
             let pipeline_layout = device
                 .create_pipeline_layout(&Default::default(), None)?
                 .guard_with(device);
+            shared_stem.set_name(*pipeline_layout, "geometry")?;
 
             let triangle_vert_shader_module =
                 create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
+            shared_stem.set_name(*triangle_vert_shader_module, "triangle vert")?;
             let triangle_frag_shader_module =
                 create_shader_module(device, include_glsl!("shaders/triangle.frag"))?;
+            shared_stem.set_name(*triangle_frag_shader_module, "triangle frag")?;
 
             Ok(Self {
                 pipeline_layout: pipeline_layout.take(),
@@ -64,11 +67,13 @@ pub struct GeometryFrond {
 
 impl GeometryFrond {
     pub fn new(geometry_stem: Arc<GeometryStem>, shared_frond: Arc<SharedFrond>) -> VkResult<Self> {
-        geometry_stem.shared_stem.assert_is(&shared_frond.stem());
+        let shared_stem = &geometry_stem.shared_stem;
+        shared_stem.assert_is(&shared_frond.stem());
         unsafe {
             let device = shared_frond.device();
 
             let render_pass = Self::create_render_pass(device, shared_frond.diffuse().format)?;
+            shared_stem.set_name(*render_pass, "geometry")?;
 
             let pipeline = Self::create_pipeline(
                 device,
@@ -78,6 +83,7 @@ impl GeometryFrond {
                 geometry_stem.pipeline_layout,
                 *render_pass,
             )?;
+            shared_stem.set_name(*pipeline, "geometry")?;
 
             let framebuffer = Self::create_framebuffer(
                 device,
@@ -85,6 +91,7 @@ impl GeometryFrond {
                 shared_frond.diffuse().view,
                 shared_frond.resolution(),
             )?;
+            shared_stem.set_name(*framebuffer, "geometry")?;
 
             Ok(Self {
                 framebuffer: framebuffer.take(),

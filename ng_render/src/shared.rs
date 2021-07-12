@@ -6,7 +6,7 @@ use ash::{
     extensions::{ext::DebugUtils, khr::Surface, khr::Swapchain},
     prelude::VkResult,
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
-    vk,
+    vk::{self, Handle},
 };
 use thiserror::Error;
 use vk_shader_macros::include_glsl;
@@ -131,6 +131,21 @@ impl SharedCrown {
         vk::FALSE
     }
 
+    pub unsafe fn set_name<T: Handle>(
+        &self,
+        device: &ash::Device,
+        object: T,
+        name: &str,
+    ) -> VkResult<()> {
+        let name = CString::new(name).unwrap();
+        let name_info = vk::DebugUtilsObjectNameInfoEXT::builder()
+            .object_type(T::TYPE)
+            .object_handle(object.as_raw())
+            .object_name(&name);
+        self.debug_utils_fn
+            .debug_utils_set_object_name(device.handle(), &name_info)
+    }
+
     pub fn instance(&self) -> &ash::Instance {
         &self.instance
     }
@@ -198,26 +213,32 @@ impl SharedStem {
             let swapchain_fn = Swapchain::new(instance, &*device);
 
             let command_pool = Self::create_command_pool(&device, queues.graphics_family)?;
+            crown.set_name(&device, *command_pool, "stem primary")?;
             let command_buffer = Self::allocate_command_buffer(&device, *command_pool)?;
+            crown.set_name(&device, *command_pool, "stem primary")?;
 
             let image_acquired_semaphore = device
                 .create_semaphore(&Default::default(), None)?
                 .guard_with(&*device);
+            crown.set_name(&device, *image_acquired_semaphore, "image acquired")?;
             let render_complete_semaphore = device
                 .create_semaphore(&Default::default(), None)?
                 .guard_with(&*device);
+            crown.set_name(&device, *render_complete_semaphore, "render complete")?;
 
             let signaled_fence_create_info =
                 vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
             let presentation_fence = device
                 .create_fence(&signaled_fence_create_info, None)?
                 .guard_with(&*device);
+            crown.set_name(&device, *presentation_fence, "presentation")?;
 
             let physical_device_memory_properties =
                 instance.get_physical_device_memory_properties(physical_device);
 
             let fullscreen_vert_shader_module =
                 create_shader_module(&device, include_glsl!("shaders/fullscreen.vert"))?;
+            crown.set_name(&device, *fullscreen_vert_shader_module, "fullscreen vert")?;
 
             drop(surface);
 
@@ -358,6 +379,10 @@ impl SharedStem {
             .map(|(index, _)| index as _)
     }
 
+    pub unsafe fn set_name<T: Handle>(&self, object: T, name: &str) -> VkResult<()> {
+        self.crown.set_name(&self.device, object, name)
+    }
+
     pub fn command_buffer(&self) -> vk::CommandBuffer {
         self.command_buffer
     }
@@ -478,6 +503,9 @@ impl SharedFrond {
             };
 
             *swapchain = Self::create_swapchain(&stem, surface_format, resolution, *swapchain)?;
+            for image in stem.swapchain_fn().get_swapchain_images(*swapchain)? {
+                stem.set_name(image, "presentation")?;
+            }
 
             let swapchain_image_views = Self::create_swapchain_image_views(
                 stem.swapchain_fn(),
@@ -485,6 +513,9 @@ impl SharedFrond {
                 *swapchain,
                 surface_format.format,
             )?;
+            for image_view in swapchain_image_views.iter() {
+                stem.set_name(*image_view, "presentation")?;
+            }
 
             let diffuse = Self::create_image(
                 &stem,
@@ -492,6 +523,7 @@ impl SharedFrond {
                 vk::Format::R8G8B8A8_UNORM,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
                 vk::ImageAspectFlags::COLOR,
+                "diffuse",
             )?;
 
             let light = Self::create_image(
@@ -500,6 +532,7 @@ impl SharedFrond {
                 vk::Format::R16G16B16A16_SFLOAT,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
                 vk::ImageAspectFlags::COLOR,
+                "light",
             )?;
 
             Ok(Self {
@@ -633,13 +666,14 @@ impl SharedFrond {
         Ok(image_views)
     }
 
-    unsafe fn create_image(
-        stem: &SharedStem,
+    unsafe fn create_image<'a>(
+        stem: &'a SharedStem,
         resolution: vk::Extent2D,
         format: vk::Format,
         usage: vk::ImageUsageFlags,
         aspects: vk::ImageAspectFlags,
-    ) -> Result<Guarded<(Image, &ash::Device)>, SharedFrondError> {
+        name: &str,
+    ) -> Result<Guarded<(Image, &'a ash::Device)>, SharedFrondError> {
         let select_device_local_memory = |memory_requirements: vk::MemoryRequirements| {
             stem.select_memory_type(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
                 .ok_or(SharedFrondError::NoAcceptableMeoryType(
@@ -667,12 +701,18 @@ impl SharedFrond {
             .queue_family_indices(&queue_family_indices)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        Image::new(
+        let image = Image::new(
             stem.device(),
             &image_create_info,
             select_device_local_memory,
             aspects,
-        )?
+        )??;
+
+        stem.set_name(image.image, name)?;
+        stem.set_name(image.memory, name)?;
+        stem.set_name(image.view, name)?;
+
+        Ok(image)
     }
 
     pub fn take_swapchain(mut self) -> SharedFrondSwapchain {

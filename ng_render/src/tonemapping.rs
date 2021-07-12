@@ -23,11 +23,14 @@ impl TonemappingStem {
             let device = shared_stem.device();
 
             let descriptor_set_layout = Self::create_descriptor_set_layout(device)?;
+            shared_stem.set_name(*descriptor_set_layout, "tonemapping")?;
 
             let pipeline_layout = Self::create_pipeline_layout(device, *descriptor_set_layout)?;
+            shared_stem.set_name(*pipeline_layout, "tonemapping")?;
 
             let frag_shader_module =
                 util::create_shader_module(device, include_glsl!("shaders/tonemapping.frag"))?;
+            shared_stem.set_name(*frag_shader_module, "tonemapping frag")?;
 
             Ok(Self {
                 descriptor_set_layout: descriptor_set_layout.take(),
@@ -95,7 +98,8 @@ impl TonemappingFrond {
         tonemapping_stem: Arc<TonemappingStem>,
         shared_frond: Arc<SharedFrond>,
     ) -> VkResult<Self> {
-        tonemapping_stem.shared_stem.assert_is(&shared_frond.stem());
+        let shared_stem = &tonemapping_stem.shared_stem;
+        shared_stem.assert_is(&shared_frond.stem());
         unsafe {
             let device = shared_frond.device();
 
@@ -107,6 +111,7 @@ impl TonemappingFrond {
                     descriptor_count: 1,
                 }],
             )?;
+            shared_stem.set_name(*descriptor_pool, "tonemapping")?;
 
             let descriptor_set = Self::allocate_descriptor_set(
                 device,
@@ -114,12 +119,14 @@ impl TonemappingFrond {
                 tonemapping_stem.descriptor_set_layout,
                 shared_frond.light().view,
             )?;
+            shared_stem.set_name(descriptor_set, "tonemapping")?;
 
             let render_pass = Self::create_render_pass(
                 device,
                 shared_frond.light().format,
                 shared_frond.swapchain_format(),
             )?;
+            shared_stem.set_name(*render_pass, "tonemapping")?;
 
             let pipeline = Self::create_pipeline(
                 device,
@@ -129,6 +136,7 @@ impl TonemappingFrond {
                 tonemapping_stem.pipeline_layout,
                 *render_pass,
             )?;
+            shared_stem.set_name(*pipeline, "tonemapping")?;
 
             let framebuffers = Self::create_framebuffers(
                 device,
@@ -137,6 +145,9 @@ impl TonemappingFrond {
                 shared_frond.swapchain_image_views(),
                 shared_frond.resolution(),
             )?;
+            for framebuffer in framebuffers.iter() {
+                shared_stem.set_name(*framebuffer, "tonemapping")?;
+            }
 
             Ok(Self {
                 descriptor_pool: descriptor_pool.take(),
