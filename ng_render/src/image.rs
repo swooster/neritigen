@@ -59,7 +59,7 @@ impl Image {
             .create_image_view(&image_view_create_info, None)?
             .guard_with(device.clone());
 
-        let image = Image {
+        let image = Self {
             format: image_create_info.format,
             image: image.take(),
             memory: memory.take(),

@@ -8,6 +8,8 @@ use ash::{
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
     vk::{self, Handle},
 };
+use crevice::std140::AsStd140;
+use mint::ColumnMatrix4;
 use thiserror::Error;
 use vk_shader_macros::include_glsl;
 use winit::window::Window;
@@ -15,7 +17,7 @@ use winit::window::Window;
 use crate::{
     guard::{GuardableResource, Guarded},
     image::Image,
-    util::create_shader_module,
+    util,
 };
 
 pub struct SharedCrown {
@@ -197,6 +199,8 @@ pub enum SharedStemError {
     VkError(#[from] vk::Result), // TODO: split into contexts
     #[error("Couldn't select acceptable graphics device")]
     NoAcceptableDeviceError,
+    #[error("Couldn't select acceptable memory type for {0:?} and {1:?}")]
+    NoAcceptableMeoryType(vk::MemoryRequirements, vk::MemoryPropertyFlags),
 }
 
 impl SharedStem {
@@ -211,6 +215,8 @@ impl SharedStem {
                 Self::create_device_and_queues(instance, surface_fn, *surface)?;
 
             let swapchain_fn = Swapchain::new(instance, &*device);
+
+            drop(surface);
 
             let command_pool = Self::create_command_pool(&device, queues.graphics_family)?;
             crown.set_name(&device, *command_pool, "stem primary")?;
@@ -237,10 +243,8 @@ impl SharedStem {
                 instance.get_physical_device_memory_properties(physical_device);
 
             let fullscreen_vert_shader_module =
-                create_shader_module(&device, include_glsl!("shaders/fullscreen.vert"))?;
+                util::create_shader_module(&device, include_glsl!("shaders/fullscreen.vert"))?;
             crown.set_name(&device, *fullscreen_vert_shader_module, "fullscreen vert")?;
-
-            drop(surface);
 
             Ok(Self {
                 command_pool: command_pool.take(),
@@ -368,15 +372,11 @@ impl SharedStem {
         memory_requirements: vk::MemoryRequirements,
         required_flags: vk::MemoryPropertyFlags,
     ) -> Option<u32> {
-        let memory_properties = self.physical_device_memory_properties;
-        memory_properties.memory_types[..memory_properties.memory_type_count as _]
-            .iter()
-            .enumerate()
-            .find(|(index, memory_type)| {
-                (1 << index) & memory_requirements.memory_type_bits != 0
-                    && memory_type.property_flags & required_flags == required_flags
-            })
-            .map(|(index, _)| index as _)
+        util::select_memory_type(
+            self.physical_device_memory_properties,
+            memory_requirements,
+            required_flags,
+        )
     }
 
     pub unsafe fn set_name<T: Handle>(&self, object: T, name: &str) -> VkResult<()> {
@@ -445,6 +445,11 @@ pub struct Queues {
     pub graphics_family: u32,
     pub present: vk::Queue,
     pub present_family: u32,
+}
+
+#[derive(AsStd140)]
+pub struct ViewBuffer {
+    pub view: ColumnMatrix4<f32>,
 }
 
 pub struct SharedFrond {

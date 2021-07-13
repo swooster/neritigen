@@ -25,7 +25,11 @@ impl TonemappingStem {
             let descriptor_set_layout = Self::create_descriptor_set_layout(device)?;
             shared_stem.set_name(*descriptor_set_layout, "tonemapping")?;
 
-            let pipeline_layout = Self::create_pipeline_layout(device, *descriptor_set_layout)?;
+            let pipeline_layout = util::create_pipeline_layout(
+                device,
+                &[*descriptor_set_layout],
+                &[], // push constant ranges
+            )?;
             shared_stem.set_name(*pipeline_layout, "tonemapping")?;
 
             let frag_shader_module =
@@ -54,18 +58,6 @@ impl TonemappingStem {
             vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
         Ok(device
             .create_descriptor_set_layout(&descriptor_set_layout_create_info, None)?
-            .guard_with(device))
-    }
-
-    unsafe fn create_pipeline_layout(
-        device: &ash::Device,
-        input_attachments_descriptor_set_layout: vk::DescriptorSetLayout,
-    ) -> VkResult<Guarded<(vk::PipelineLayout, &ash::Device)>> {
-        let set_layouts = [input_attachments_descriptor_set_layout];
-        let pipeline_layout_create_info =
-            vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
-        Ok(device
-            .create_pipeline_layout(&pipeline_layout_create_info, None)?
             .guard_with(device))
     }
 }

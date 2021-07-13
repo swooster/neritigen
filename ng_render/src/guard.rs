@@ -163,6 +163,7 @@ define_guardable!(
 );
 define_guardable!(vk::SurfaceKHR, khr::Surface, destroy_surface);
 define_guardable!(vk::SwapchainKHR, khr::Swapchain, destroy_swapchain);
+define_guardable!(vk::Buffer, ash::Device, destroy_buffer);
 define_guardable!(vk::CommandPool, ash::Device, destroy_command_pool);
 define_guardable!(vk::DescriptorPool, ash::Device, destroy_descriptor_pool);
 define_guardable!(vk::DescriptorSetLayout, ash::Device, destroy_descriptor_set_layout);

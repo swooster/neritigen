@@ -2,12 +2,13 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use ash::{prelude::VkResult, version::DeviceV1_0, vk};
+use crevice::std140::{AsStd140, Std140};
 use vk_shader_macros::include_glsl;
 
 use crate::{
     guard::{GuardableResource, Guarded},
-    shared::{SharedFrond, SharedStem},
-    util::create_shader_module,
+    shared::{SharedFrond, SharedStem, ViewBuffer},
+    util,
 };
 
 pub struct GeometryStem {
@@ -22,16 +23,22 @@ impl GeometryStem {
         unsafe {
             let device = shared_stem.device();
 
-            let pipeline_layout = device
-                .create_pipeline_layout(&Default::default(), None)?
-                .guard_with(device);
+            let pipeline_layout = util::create_pipeline_layout(
+                device,
+                &[], // descriptor set layouts
+                &[vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::VERTEX,
+                    offset: 0,
+                    size: ViewBuffer::std140_size_static() as _,
+                }],
+            )?;
             shared_stem.set_name(*pipeline_layout, "geometry")?;
 
             let triangle_vert_shader_module =
-                create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
+                util::create_shader_module(device, include_glsl!("shaders/triangle.vert"))?;
             shared_stem.set_name(*triangle_vert_shader_module, "triangle vert")?;
             let triangle_frag_shader_module =
-                create_shader_module(device, include_glsl!("shaders/triangle.frag"))?;
+                util::create_shader_module(device, include_glsl!("shaders/triangle.frag"))?;
             shared_stem.set_name(*triangle_frag_shader_module, "triangle frag")?;
 
             Ok(Self {
@@ -62,7 +69,7 @@ pub struct GeometryFrond {
     pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
     shared_frond: Arc<SharedFrond>,
-    _geometry_stem: Arc<GeometryStem>,
+    geometry_stem: Arc<GeometryStem>,
 }
 
 impl GeometryFrond {
@@ -98,7 +105,7 @@ impl GeometryFrond {
                 pipeline: pipeline.take(),
                 render_pass: render_pass.take(),
                 shared_frond,
-                _geometry_stem: geometry_stem,
+                geometry_stem,
             })
         }
     }
@@ -239,6 +246,14 @@ impl GeometryFrond {
     pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer) {
         let device = self.shared_frond.device();
 
+        let view = [
+            [0.75, 0.0, 0.0, 0.0],
+            [0.0, 0.75, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        .into();
+
         let render_area = vk::Rect2D {
             offset: Default::default(),
             extent: self.shared_frond.resolution(),
@@ -259,6 +274,15 @@ impl GeometryFrond {
             command_buffer,
             &render_pass_begin_info,
             vk::SubpassContents::INLINE,
+        );
+
+        let view_buffer = ViewBuffer { view };
+        device.cmd_push_constants(
+            command_buffer,
+            self.geometry_stem.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            view_buffer.as_std140().as_bytes(),
         );
 
         device.cmd_bind_pipeline(
