@@ -243,16 +243,8 @@ impl GeometryFrond {
             .guard_with(device))
     }
 
-    pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer) {
+    pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer, view: mint::ColumnMatrix4<f32>) {
         let device = self.shared_frond.device();
-
-        let view = [
-            [0.75, 0.0, 0.0, 0.0],
-            [0.0, 0.75, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-        .into();
 
         let render_area = vk::Rect2D {
             offset: Default::default(),

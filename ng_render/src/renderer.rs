@@ -1,6 +1,8 @@
+use std::f32::consts::TAU;
 use std::sync::Arc;
 
 use ash::{prelude::VkResult, version::DeviceV1_0, vk};
+use nalgebra as na;
 use thiserror::Error;
 use winit::window::Window;
 
@@ -12,6 +14,7 @@ use crate::{
         SharedStem, SharedStemError,
     },
     tonemapping::{TonemappingFrond, TonemappingStem},
+    util,
 };
 
 #[derive(Error, Debug)]
@@ -78,7 +81,10 @@ impl Renderer {
         self.stem_and_frond = None;
     }
 
-    pub fn draw(&mut self) -> Result<bool, RendererError> {
+    pub fn draw(
+        &mut self,
+        player_transform: mint::ColumnMatrix4<f32>,
+    ) -> Result<bool, RendererError> {
         let frond = match self.rebuild() {
             Err(RendererError::FrondCreationError(SharedFrondError::NoSurfaceArea)) => {
                 return Ok(false)
@@ -86,7 +92,7 @@ impl Renderer {
             x => x,
         }?;
 
-        let result = unsafe { frond.draw() };
+        let result = unsafe { frond.draw(player_transform.into()) };
         if result == Err(vk::Result::ERROR_DEVICE_LOST) {
             self.lose_device();
         }
@@ -181,9 +187,8 @@ impl RendererFrond {
         })
     }
 
-    unsafe fn draw(&self) -> VkResult<bool> {
+    unsafe fn draw(&self, player_transform: na::Matrix4<f32>) -> VkResult<bool> {
         let frond = &self.shared;
-
         let swapchain = frond.swapchain();
 
         let stem = frond.stem();
@@ -194,6 +199,9 @@ impl RendererFrond {
         let queues = stem.queues();
         let render_complete_semaphore = stem.render_complete_semaphore();
         let swapchain_fn = stem.swapchain_fn();
+
+        let view_matrix = util::perspective_matrix(0.1, TAU * 0.25, frond.resolution())
+            * player_transform.try_inverse().unwrap();
 
         device.wait_for_fences(&[presentation_fence], true, u64::MAX)?;
         device.reset_fences(&[presentation_fence])?;
@@ -214,7 +222,7 @@ impl RendererFrond {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
 
-        self.geometry.draw(command_buffer);
+        self.geometry.draw(command_buffer, view_matrix.into());
         self.lighting.draw(command_buffer);
         self.tonemapping.draw(command_buffer, image_index);
 

@@ -7,6 +7,7 @@ edition = "2018"
 
 [dependencies]
 env_logger = "0.8.4"
+nalgebra = { version = "0.28.0", features = ["convert-mint"] }
 winit = "0.25.0"
 
 ng_render = { path = "../ng_render" }

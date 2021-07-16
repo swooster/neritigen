@@ -1,4 +1,5 @@
 use ash::{prelude::VkResult, version::DeviceV1_0, vk};
+use nalgebra as na;
 
 use crate::guard::{GuardableResource, Guarded};
 
@@ -35,6 +36,27 @@ pub unsafe fn create_shader_module<'a>(
     let shader_module_create_info = vk::ShaderModuleCreateInfo::builder().code(spirv);
     let shader_module = device.create_shader_module(&shader_module_create_info, None)?;
     Ok(shader_module.guard_with(device))
+}
+
+// Combination of coordinate swizzle and infinite negative z perspective matrix
+// worldspace +x, +y, +z maps to cameraspace +z, -x, -y
+// worldspace x of near_z..infinity maps to camera space 1..0
+pub fn perspective_matrix(
+    near_z: f32,
+    diagonal_fov: f32,
+    resolution: vk::Extent2D,
+) -> na::Matrix4<f32> {
+    let aspect = resolution.height as f32 / resolution.width as f32;
+    let cotan_x = (aspect * aspect + 1.0).sqrt() / (0.5 * diagonal_fov).tan();
+    let cotan_y = cotan_x / aspect;
+
+    [
+        [0.0, 0.0, 0.0, 1.0],
+        [-cotan_x, 0.0, 0.0, 0.0],
+        [0.0, -cotan_y, 0.0, 0.0],
+        [0.0, 0.0, near_z, 0.0],
+    ]
+    .into()
 }
 
 pub fn select_memory_type(

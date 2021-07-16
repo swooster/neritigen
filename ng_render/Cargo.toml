@@ -11,6 +11,7 @@ ash-window = "0.6.0"
 crevice = "0.6.0"
 log = "0.4.14"
 mint = "0.5.6"
+nalgebra = { version = "0.28.0", features = ["convert-mint"] }
 scopeguard = "1.1.0"
 thiserror = "1.0.25"
 vk-shader-macros = "0.2.7"
