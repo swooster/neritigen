@@ -127,11 +127,10 @@ impl LightingFrond {
             )?;
             shared_stem.set_name(*pipeline, "lighting")?;
 
-            let framebuffer = Self::create_framebuffer(
+            let framebuffer = util::create_framebuffer(
                 device,
                 *render_pass,
-                shared_frond.diffuse().view,
-                shared_frond.light().view,
+                &[shared_frond.diffuse().view, shared_frond.light().view],
                 shared_frond.resolution(),
             )?;
             shared_stem.set_name(*framebuffer, "lighting")?;
@@ -313,25 +312,6 @@ impl LightingFrond {
             .map_err(|(_, err)| err)?;
 
         Ok(pipelines.pop().unwrap().guard_with(device))
-    }
-
-    unsafe fn create_framebuffer(
-        device: &ash::Device,
-        render_pass: vk::RenderPass,
-        diffuse_view: vk::ImageView,
-        light_view: vk::ImageView,
-        resolution: vk::Extent2D,
-    ) -> VkResult<Guarded<(vk::Framebuffer, &ash::Device)>> {
-        let attachments = [diffuse_view, light_view];
-        let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-            .render_pass(render_pass)
-            .attachments(&attachments)
-            .width(resolution.width)
-            .height(resolution.height)
-            .layers(1);
-        Ok(device
-            .create_framebuffer(&framebuffer_create_info, None)?
-            .guard_with(device))
     }
 
     pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer) {

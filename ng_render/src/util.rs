@@ -16,6 +16,23 @@ pub unsafe fn create_descriptor_pool<'a>(
         .guard_with(device))
 }
 
+pub unsafe fn create_framebuffer<'a>(
+    device: &'a ash::Device,
+    render_pass: vk::RenderPass,
+    attachments: &[vk::ImageView],
+    resolution: vk::Extent2D,
+) -> VkResult<Guarded<(vk::Framebuffer, &'a ash::Device)>> {
+    let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
+        .render_pass(render_pass)
+        .attachments(&attachments)
+        .width(resolution.width)
+        .height(resolution.height)
+        .layers(1);
+    Ok(device
+        .create_framebuffer(&framebuffer_create_info, None)?
+        .guard_with(device))
+}
+
 pub unsafe fn create_pipeline_layout<'a>(
     device: &'a ash::Device,
     set_layouts: &[vk::DescriptorSetLayout],

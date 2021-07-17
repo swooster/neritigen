@@ -453,6 +453,7 @@ pub struct ViewBuffer {
 }
 
 pub struct SharedFrond {
+    depth_stencil: Image,
     diffuse: Image,
     light: Image,
     resolution: vk::Extent2D,
@@ -531,6 +532,15 @@ impl SharedFrond {
                 "diffuse",
             )?;
 
+            let depth_stencil = Self::create_image(
+                &stem,
+                resolution,
+                vk::Format::D24_UNORM_S8_UINT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                vk::ImageAspectFlags::DEPTH,
+                "depth_stencil",
+            )?;
+
             let light = Self::create_image(
                 &stem,
                 resolution,
@@ -541,6 +551,7 @@ impl SharedFrond {
             )?;
 
             Ok(Self {
+                depth_stencil: depth_stencil.take(),
                 diffuse: diffuse.take(),
                 light: light.take(),
                 swapchain: std::mem::take(swapchain),
@@ -731,6 +742,10 @@ impl SharedFrond {
         self.resolution() != self.stem().crown().window_resolution()
     }
 
+    pub fn depth_stencil(&self) -> &Image {
+        &self.depth_stencil
+    }
+
     pub fn device(&self) -> &ash::Device {
         self.stem.device()
     }
@@ -772,6 +787,7 @@ impl Drop for SharedFrond {
             let _ = device.device_wait_idle();
 
             self.light.destroy_with(device);
+            self.depth_stencil.destroy_with(device);
             self.diffuse.destroy_with(device);
             for &image_view in self.swapchain_image_views.iter() {
                 device.destroy_image_view(image_view, None);

@@ -79,7 +79,11 @@ impl GeometryFrond {
         unsafe {
             let device = shared_frond.device();
 
-            let render_pass = Self::create_render_pass(device, shared_frond.diffuse().format)?;
+            let render_pass = Self::create_render_pass(
+                device,
+                shared_frond.diffuse().format,
+                shared_frond.depth_stencil().format,
+            )?;
             shared_stem.set_name(*render_pass, "geometry")?;
 
             let pipeline = Self::create_pipeline(
@@ -92,10 +96,13 @@ impl GeometryFrond {
             )?;
             shared_stem.set_name(*pipeline, "geometry")?;
 
-            let framebuffer = Self::create_framebuffer(
+            let framebuffer = util::create_framebuffer(
                 device,
                 *render_pass,
-                shared_frond.diffuse().view,
+                &[
+                    shared_frond.diffuse().view,
+                    shared_frond.depth_stencil().view,
+                ],
                 shared_frond.resolution(),
             )?;
             shared_stem.set_name(*framebuffer, "geometry")?;
@@ -112,24 +119,42 @@ impl GeometryFrond {
 
     unsafe fn create_render_pass(
         device: &ash::Device,
-        format: vk::Format,
+        diffuse_format: vk::Format,
+        depth_stencil_format: vk::Format,
     ) -> VkResult<Guarded<(vk::RenderPass, &ash::Device)>> {
-        let attachments = [vk::AttachmentDescription::builder()
-            .format(format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .build()];
+        let attachments = [
+            vk::AttachmentDescription::builder()
+                .format(diffuse_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(depth_stencil_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .build(),
+        ];
 
         let color_attachment_refs = [vk::AttachmentReference::builder()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .build()];
+        let depth_stencil_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .build();
         let subpasses = [vk::SubpassDescription::builder()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_attachment_refs)
+            .depth_stencil_attachment(&depth_stencil_attachment_ref)
             .build()];
 
         let dependencies = [];
@@ -191,6 +216,18 @@ impl GeometryFrond {
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::GREATER)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false)
+            //.front()
+            //.back()
+            //.min_depth_bounds()
+            //.max_depth_bounds()
+            ;
+
         let attachments = [vk::PipelineColorBlendAttachmentState {
             color_write_mask: vk::ColorComponentFlags::all(),
             ..Default::default()
@@ -206,7 +243,7 @@ impl GeometryFrond {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization_state)
             .multisample_state(&multisample_state)
-            //.depth_stencil_state()
+            .depth_stencil_state(&depth_stencil_state)
             .color_blend_state(&color_blend_state)
             // .dynamic_state()
             .layout(pipeline_layout)
@@ -225,25 +262,11 @@ impl GeometryFrond {
         Ok(pipelines.pop().unwrap().guard_with(device))
     }
 
-    unsafe fn create_framebuffer(
-        device: &ash::Device,
-        render_pass: vk::RenderPass,
-        image_view: vk::ImageView,
-        resolution: vk::Extent2D,
-    ) -> VkResult<Guarded<(vk::Framebuffer, &ash::Device)>> {
-        let attachments = [image_view];
-        let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-            .render_pass(render_pass)
-            .attachments(&attachments)
-            .width(resolution.width)
-            .height(resolution.height)
-            .layers(1);
-        Ok(device
-            .create_framebuffer(&framebuffer_create_info, None)?
-            .guard_with(device))
-    }
-
-    pub unsafe fn draw(&self, command_buffer: vk::CommandBuffer, view: mint::ColumnMatrix4<f32>) {
+    pub unsafe fn draw(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        view: mint::ColumnMatrix4<f32>,
+    ) {
         let device = self.shared_frond.device();
 
         let render_area = vk::Rect2D {
@@ -251,11 +274,19 @@ impl GeometryFrond {
             extent: self.shared_frond.resolution(),
         };
 
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
             },
-        }];
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 0.0,
+                    stencil: 0,
+                },
+            },
+        ];
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)
@@ -285,7 +316,7 @@ impl GeometryFrond {
 
         device.cmd_draw(
             command_buffer,
-            3, // vertices
+            6, // vertices
             1, // instances
             0, // first vertex
             0, // first instance

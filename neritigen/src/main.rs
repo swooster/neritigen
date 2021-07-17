@@ -29,8 +29,9 @@ fn main() {
 
     let mut input_state = InputState::new();
     let mut player = Player::new();
-    player.position = [0.0, 0.0, 0.125].into();
-    player.yaw = 0.75;
+    player.position = [-2.0, -2.0, 2.0].into();
+    player.yaw = 0.125;
+    player.pitch = -0.125;
 
     let mut next_tick = Instant::now();
     let tick_duration = Duration::new(0, 1_000_000_000 / 60);
