@@ -8,6 +8,7 @@ pub struct Image {
     pub format: vk::Format,
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
+    pub resolution: vk::Extent3D,
     pub view: vk::ImageView,
 }
 
@@ -63,9 +64,18 @@ impl Image {
             format: image_create_info.format,
             image: image.take(),
             memory: memory.take(),
+            resolution: image_create_info.extent,
             view: view.take(),
         };
         Ok(Ok(image.guard_with(device)))
+    }
+
+    pub fn resolution_2d(&self) -> vk::Extent2D {
+        assert_eq!(self.resolution.depth, 1);
+        vk::Extent2D {
+            width: self.resolution.width,
+            height: self.resolution.height,
+        }
     }
 
     pub unsafe fn destroy_with(&mut self, device: &ash::Device) {

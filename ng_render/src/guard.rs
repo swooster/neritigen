@@ -175,5 +175,6 @@ define_guardable!(vk::ImageView, ash::Device, destroy_image_view);
 define_guardable!(vk::Pipeline, ash::Device, destroy_pipeline);
 define_guardable!(vk::PipelineLayout, ash::Device, destroy_pipeline_layout);
 define_guardable!(vk::RenderPass, ash::Device, destroy_render_pass);
+define_guardable!(vk::Sampler, ash::Device, destroy_sampler);
 define_guardable!(vk::Semaphore, ash::Device, destroy_semaphore);
 define_guardable!(vk::ShaderModule, ash::Device, destroy_shader_module);

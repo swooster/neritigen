@@ -222,8 +222,10 @@ impl RendererFrond {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         device.begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
 
-        self.geometry.draw(command_buffer, view_matrix.into());
-        self.lighting.draw(command_buffer);
+        let view_matrix = view_matrix.into();
+        self.geometry.draw(command_buffer, view_matrix);
+        let draw_shadow = |shadow_view| self.geometry.draw_shadow(command_buffer, shadow_view);
+        self.lighting.draw(command_buffer, view_matrix, draw_shadow);
         self.tonemapping.draw(command_buffer, image_index);
 
         device.end_command_buffer(command_buffer)?;

@@ -452,11 +452,22 @@ pub struct ViewBuffer {
     pub view: ColumnMatrix4<f32>,
 }
 
+impl ViewBuffer {
+    pub fn push_constant_range() -> vk::PushConstantRange {
+        vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            offset: 0,
+            size: Self::std140_size_static() as _,
+        }
+    }
+}
+
 pub struct SharedFrond {
     depth_stencil: Image,
     diffuse: Image,
     light: Image,
     resolution: vk::Extent2D,
+    shadow: Image,
     stem: Arc<SharedStem>,
     swapchain: vk::SwapchainKHR,
     swapchain_image_views: Vec<vk::ImageView>,
@@ -536,9 +547,22 @@ impl SharedFrond {
                 &stem,
                 resolution,
                 vk::Format::D24_UNORM_S8_UINT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::INPUT_ATTACHMENT,
                 vk::ImageAspectFlags::DEPTH,
                 "depth_stencil",
+            )?;
+
+            let shadow = Self::create_image(
+                &stem,
+                vk::Extent2D {
+                    width: 1024,
+                    height: 1024,
+                },
+                vk::Format::D24_UNORM_S8_UINT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                vk::ImageAspectFlags::DEPTH,
+                "shadow",
             )?;
 
             let light = Self::create_image(
@@ -554,6 +578,7 @@ impl SharedFrond {
                 depth_stencil: depth_stencil.take(),
                 diffuse: diffuse.take(),
                 light: light.take(),
+                shadow: shadow.take(),
                 swapchain: std::mem::take(swapchain),
                 swapchain_image_views: swapchain_image_views.take(),
                 resolution,
@@ -762,6 +787,10 @@ impl SharedFrond {
         self.resolution
     }
 
+    pub fn shadow(&self) -> &Image {
+        &self.shadow
+    }
+
     pub fn stem(&self) -> Arc<SharedStem> {
         self.stem.clone()
     }
@@ -787,6 +816,7 @@ impl Drop for SharedFrond {
             let _ = device.device_wait_idle();
 
             self.light.destroy_with(device);
+            self.shadow.destroy_with(device);
             self.depth_stencil.destroy_with(device);
             self.diffuse.destroy_with(device);
             for &image_view in self.swapchain_image_views.iter() {
