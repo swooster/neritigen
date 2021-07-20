@@ -16,6 +16,7 @@ use crate::{
 #[derive(AsStd140)]
 struct LightBuffer {
     pub screen_to_shadow: mint::ColumnMatrix4<f32>,
+    pub sunlight_direction: mint::Vector4<f32>,
 }
 
 impl LightBuffer {
@@ -86,6 +87,12 @@ impl LightingStem {
                 .build(),
             vk::DescriptorSetLayoutBinding::builder()
                 .binding(2)
+                .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(3)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
@@ -162,7 +169,7 @@ impl LightingFrond {
                 &[
                     vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::INPUT_ATTACHMENT,
-                        descriptor_count: 2,
+                        descriptor_count: 3,
                     },
                     vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -177,6 +184,7 @@ impl LightingFrond {
                 *descriptor_pool,
                 lighting_stem.descriptor_set_layout,
                 shared_frond.diffuse().view,
+                shared_frond.normal().view,
                 shared_frond.depth_stencil().view,
                 shared_frond.shadow().view,
                 lighting_stem.shadow_sampler,
@@ -186,6 +194,7 @@ impl LightingFrond {
             let render_pass = Self::create_render_pass(
                 device,
                 shared_frond.diffuse().format,
+                shared_frond.normal().format,
                 shared_frond.depth_stencil().format,
                 shared_frond.light().format,
             )?;
@@ -206,6 +215,7 @@ impl LightingFrond {
                 *render_pass,
                 &[
                     shared_frond.diffuse().view,
+                    shared_frond.normal().view,
                     shared_frond.depth_stencil().view,
                     shared_frond.light().view,
                 ],
@@ -230,6 +240,7 @@ impl LightingFrond {
         descriptor_pool: vk::DescriptorPool,
         descriptor_set_layout: vk::DescriptorSetLayout,
         diffuse_view: vk::ImageView,
+        normal_view: vk::ImageView,
         depth_view: vk::ImageView,
         shadow_view: vk::ImageView,
         shadow_sampler: vk::Sampler,
@@ -243,6 +254,11 @@ impl LightingFrond {
         let diffuse_info = [vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
             image_view: diffuse_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let normal_info = [vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: normal_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let depth_info = [vk::DescriptorImageInfo {
@@ -268,11 +284,18 @@ impl LightingFrond {
                 .dst_binding(1)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
-                .image_info(&depth_info)
+                .image_info(&normal_info)
                 .build(),
             vk::WriteDescriptorSet::builder()
                 .dst_set(descriptor_set)
                 .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                .image_info(&depth_info)
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(3)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&shadow_info)
@@ -286,12 +309,21 @@ impl LightingFrond {
     unsafe fn create_render_pass(
         device: &ash::Device,
         diffuse_format: vk::Format,
+        normal_format: vk::Format,
         depth_format: vk::Format,
         light_format: vk::Format,
     ) -> VkResult<Guarded<(vk::RenderPass, &ash::Device)>> {
         let attachments = [
             vk::AttachmentDescription::builder()
                 .format(diffuse_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(normal_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::LOAD)
                 .store_op(vk::AttachmentStoreOp::DONT_CARE)
@@ -323,15 +355,19 @@ impl LightingFrond {
             },
             vk::AttachmentReference {
                 attachment: 1,
+                layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            },
+            vk::AttachmentReference {
+                attachment: 2,
                 layout: vk::ImageLayout::GENERAL,
             },
         ];
         let color_attachments = [vk::AttachmentReference {
-            attachment: 2,
+            attachment: 3,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         }];
         let depth_stencil_attachment = vk::AttachmentReference {
-            attachment: 1,
+            attachment: 2,
             layout: vk::ImageLayout::GENERAL,
         };
         let subpasses = [vk::SubpassDescription::builder()
@@ -492,6 +528,9 @@ impl LightingFrond {
         let view: na::Matrix4<f32> = view.into();
         let screen_to_shadow = world_to_sunlight * view.try_inverse().unwrap();
 
+        let sunlight_direction =
+            (sunlight_to_world * na::Vector4::new(0.0, 0.0, -1.0, 0.0)).normalize();
+
         let render_area = vk::Rect2D {
             offset: Default::default(),
             extent: self.shared_frond.resolution(),
@@ -512,6 +551,7 @@ impl LightingFrond {
 
         let light_buffer = LightBuffer {
             screen_to_shadow: screen_to_shadow.into(),
+            sunlight_direction: sunlight_direction.into(),
         };
         device.cmd_push_constants(
             command_buffer,

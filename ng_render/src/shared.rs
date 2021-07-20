@@ -466,6 +466,7 @@ pub struct SharedFrond {
     depth_stencil: Image,
     diffuse: Image,
     light: Image,
+    normal: Image,
     resolution: vk::Extent2D,
     shadow: Image,
     stem: Arc<SharedStem>,
@@ -543,6 +544,15 @@ impl SharedFrond {
                 "diffuse",
             )?;
 
+            let normal = Self::create_image(
+                &stem,
+                resolution,
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+                "normal",
+            )?;
+
             let depth_stencil = Self::create_image(
                 &stem,
                 resolution,
@@ -578,6 +588,7 @@ impl SharedFrond {
                 depth_stencil: depth_stencil.take(),
                 diffuse: diffuse.take(),
                 light: light.take(),
+                normal: normal.take(),
                 shadow: shadow.take(),
                 swapchain: std::mem::take(swapchain),
                 swapchain_image_views: swapchain_image_views.take(),
@@ -783,6 +794,10 @@ impl SharedFrond {
         &self.light
     }
 
+    pub fn normal(&self) -> &Image {
+        &self.normal
+    }
+
     pub fn resolution(&self) -> vk::Extent2D {
         self.resolution
     }
@@ -815,10 +830,11 @@ impl Drop for SharedFrond {
         unsafe {
             let _ = device.device_wait_idle();
 
-            self.light.destroy_with(device);
             self.shadow.destroy_with(device);
-            self.depth_stencil.destroy_with(device);
+            self.normal.destroy_with(device);
+            self.light.destroy_with(device);
             self.diffuse.destroy_with(device);
+            self.depth_stencil.destroy_with(device);
             for &image_view in self.swapchain_image_views.iter() {
                 device.destroy_image_view(image_view, None);
             }

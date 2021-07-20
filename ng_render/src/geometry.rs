@@ -87,6 +87,7 @@ impl GeometryFrond {
             let render_pass = Self::create_render_pass(
                 device,
                 shared_frond.diffuse().format,
+                shared_frond.normal().format,
                 shared_frond.depth_stencil().format,
             )?;
             shared_stem.set_name(*render_pass, "geometry")?;
@@ -120,6 +121,7 @@ impl GeometryFrond {
                 *render_pass,
                 &[
                     shared_frond.diffuse().view,
+                    shared_frond.normal().view,
                     shared_frond.depth_stencil().view,
                 ],
                 shared_frond.resolution(),
@@ -150,11 +152,20 @@ impl GeometryFrond {
     unsafe fn create_render_pass(
         device: &ash::Device,
         diffuse_format: vk::Format,
+        normal_format: vk::Format,
         depth_stencil_format: vk::Format,
     ) -> VkResult<Guarded<(vk::RenderPass, &ash::Device)>> {
         let attachments = [
             vk::AttachmentDescription::builder()
                 .format(diffuse_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentDescription::builder()
+                .format(normal_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
@@ -173,12 +184,18 @@ impl GeometryFrond {
                 .build(),
         ];
 
-        let color_attachment_refs = [vk::AttachmentReference::builder()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .build()];
+        let color_attachment_refs = [
+            vk::AttachmentReference::builder()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+            vk::AttachmentReference::builder()
+                .attachment(1)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build(),
+        ];
         let depth_stencil_attachment_ref = vk::AttachmentReference::builder()
-            .attachment(1)
+            .attachment(2)
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .build();
         let subpasses = [vk::SubpassDescription::builder()
@@ -293,10 +310,16 @@ impl GeometryFrond {
             //.max_depth_bounds()
             ;
 
-        let attachments = [vk::PipelineColorBlendAttachmentState {
-            color_write_mask: vk::ColorComponentFlags::all(),
-            ..Default::default()
-        }];
+        let attachments = [
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::all(),
+                ..Default::default()
+            },
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::all(),
+                ..Default::default()
+            },
+        ];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
 
@@ -428,6 +451,11 @@ impl GeometryFrond {
             vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            },
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.5, 0.5, 0.5, 1.0],
                 },
             },
             vk::ClearValue {
