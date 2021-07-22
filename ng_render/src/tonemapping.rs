@@ -240,19 +240,19 @@ impl TonemappingFrond {
 
     unsafe fn create_pipeline(
         device: &ash::Device,
-        triangle_vert_shader_module: vk::ShaderModule,
-        triangle_frag_shader_module: vk::ShaderModule,
+        tonemapping_vert_shader_module: vk::ShaderModule,
+        tonemapping_frag_shader_module: vk::ShaderModule,
         resolution: vk::Extent2D,
         pipeline_layout: vk::PipelineLayout,
         render_pass: vk::RenderPass,
     ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
         let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
         let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
-            .module(triangle_vert_shader_module)
+            .module(tonemapping_vert_shader_module)
             .name(entry_point)
             .stage(vk::ShaderStageFlags::VERTEX);
         let frag_create_info = vk::PipelineShaderStageCreateInfo::builder()
-            .module(triangle_frag_shader_module)
+            .module(tonemapping_frag_shader_module)
             .name(entry_point)
             .stage(vk::ShaderStageFlags::FRAGMENT);
         let shader_stages = [*vert_create_info, *frag_create_info];

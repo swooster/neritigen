@@ -8,6 +8,7 @@ layout(set = 0, binding = 3) uniform sampler2D shadow;
 layout(push_constant) uniform LightBuffer {
     mat4 screen_to_light;
     vec4 sunlight_direction;
+    int shadow_size;
 } light_buffer;
 
 layout(location = 0) in vec2 ndc;

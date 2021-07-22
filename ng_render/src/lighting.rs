@@ -17,12 +17,13 @@ use crate::{
 struct LightBuffer {
     pub screen_to_shadow: mint::ColumnMatrix4<f32>,
     pub sunlight_direction: mint::Vector4<f32>,
+    pub shadow_size: i32,
 }
 
 impl LightBuffer {
     pub fn push_constant_range() -> vk::PushConstantRange {
         vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
             size: Self::std140_size_static() as _,
         }
@@ -31,9 +32,11 @@ impl LightBuffer {
 
 pub struct LightingStem {
     descriptor_set_layout: vk::DescriptorSetLayout,
-    frag_shader_module: vk::ShaderModule,
+    lighting_frag_shader_module: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
     shadow_sampler: vk::Sampler,
+    volumetric_frag_shader_module: vk::ShaderModule,
+    volumetric_vert_shader_module: vk::ShaderModule,
     shared_stem: Arc<SharedStem>,
 }
 
@@ -52,18 +55,28 @@ impl LightingStem {
             )?;
             shared_stem.set_name(*pipeline_layout, "lighting")?;
 
-            let frag_shader_module =
+            let volumetric_vert_shader_module =
+                util::create_shader_module(device, include_glsl!("shaders/volumetric.vert"))?;
+            shared_stem.set_name(*volumetric_vert_shader_module, "volumetric vert")?;
+
+            let volumetric_frag_shader_module =
+                util::create_shader_module(device, include_glsl!("shaders/volumetric.frag"))?;
+            shared_stem.set_name(*volumetric_frag_shader_module, "volumetric frag")?;
+
+            let lighting_frag_shader_module =
                 util::create_shader_module(device, include_glsl!("shaders/lighting.frag"))?;
-            shared_stem.set_name(*frag_shader_module, "lighting frag")?;
+            shared_stem.set_name(*lighting_frag_shader_module, "lighting frag")?;
 
             let shadow_sampler = Self::create_sampler(device)?;
             shared_stem.set_name(*shadow_sampler, "shadow")?;
 
             Ok(Self {
                 descriptor_set_layout: descriptor_set_layout.take(),
-                frag_shader_module: frag_shader_module.take(),
+                lighting_frag_shader_module: lighting_frag_shader_module.take(),
                 pipeline_layout: pipeline_layout.take(),
                 shadow_sampler: shadow_sampler.take(),
+                volumetric_frag_shader_module: volumetric_frag_shader_module.take(),
+                volumetric_vert_shader_module: volumetric_vert_shader_module.take(),
                 shared_stem,
             })
         }
@@ -95,7 +108,7 @@ impl LightingStem {
                 .binding(3)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .build(),
         ];
         let descriptor_set_layout_create_info =
@@ -139,7 +152,9 @@ impl Drop for LightingStem {
             let _ = device.device_wait_idle();
 
             device.destroy_sampler(self.shadow_sampler, None);
-            device.destroy_shader_module(self.frag_shader_module, None);
+            device.destroy_shader_module(self.volumetric_frag_shader_module, None);
+            device.destroy_shader_module(self.volumetric_vert_shader_module, None);
+            device.destroy_shader_module(self.lighting_frag_shader_module, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         }
@@ -150,8 +165,9 @@ pub struct LightingFrond {
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     framebuffer: vk::Framebuffer,
-    pipeline: vk::Pipeline,
+    lighting_pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
+    volumetric_pipeline: vk::Pipeline,
     shared_frond: Arc<SharedFrond>,
     lighting_stem: Arc<LightingStem>,
 }
@@ -200,15 +216,25 @@ impl LightingFrond {
             )?;
             shared_stem.set_name(*render_pass, "lighting")?;
 
-            let pipeline = Self::create_pipeline(
+            let volumetric_pipeline = Self::create_volumetric_pipeline(
                 device,
-                shared_frond.stem().fullscreen_vert_shader_module(),
-                lighting_stem.frag_shader_module,
+                lighting_stem.volumetric_vert_shader_module,
+                lighting_stem.volumetric_frag_shader_module,
                 shared_frond.resolution(),
                 lighting_stem.pipeline_layout,
                 *render_pass,
             )?;
-            shared_stem.set_name(*pipeline, "lighting")?;
+            shared_stem.set_name(*volumetric_pipeline, "volumetric")?;
+
+            let lighting_pipeline = Self::create_lighting_pipeline(
+                device,
+                shared_frond.stem().fullscreen_vert_shader_module(),
+                lighting_stem.lighting_frag_shader_module,
+                shared_frond.resolution(),
+                lighting_stem.pipeline_layout,
+                *render_pass,
+            )?;
+            shared_stem.set_name(*lighting_pipeline, "lighting")?;
 
             let framebuffer = util::create_framebuffer(
                 device,
@@ -226,8 +252,9 @@ impl LightingFrond {
             Ok(Self {
                 descriptor_pool: descriptor_pool.take(),
                 framebuffer: framebuffer.take(),
-                pipeline: pipeline.take(),
+                lighting_pipeline: lighting_pipeline.take(),
                 render_pass: render_pass.take(),
+                volumetric_pipeline: volumetric_pipeline.take(),
                 descriptor_set,
                 shared_frond,
                 lighting_stem,
@@ -341,7 +368,7 @@ impl LightingFrond {
             vk::AttachmentDescription::builder()
                 .format(light_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -368,39 +395,74 @@ impl LightingFrond {
         }];
         let depth_stencil_attachment = vk::AttachmentReference {
             attachment: 2,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+        let depth_stencil_attachment_general = vk::AttachmentReference {
+            attachment: 2,
             layout: vk::ImageLayout::GENERAL,
         };
-        let subpasses = [vk::SubpassDescription::builder()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .input_attachments(&input_attachments)
-            .color_attachments(&color_attachments)
-            .depth_stencil_attachment(&depth_stencil_attachment)
-            .build()];
+        let subpasses = [
+            vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .input_attachments(&[])
+                .color_attachments(&color_attachments)
+                .depth_stencil_attachment(&depth_stencil_attachment)
+                .build(),
+            vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .input_attachments(&input_attachments)
+                .color_attachments(&color_attachments)
+                .depth_stencil_attachment(&depth_stencil_attachment_general)
+                .build(),
+        ];
 
         let dependencies = [
+            // Subpass 0:
+            // Make shadow depth available for vertex positioning
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
-                .dst_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::INPUT_ATTACHMENT_READ)
-                .build(),
-            vk::SubpassDependency::builder()
-                .src_subpass(vk::SUBPASS_EXTERNAL)
-                .dst_subpass(0)
                 .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS)
-                .dst_stage_mask(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
                 .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_subpass(0)
+                .dst_stage_mask(vk::PipelineStageFlags::VERTEX_SHADER)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+            // Make geometry depth available for light-volume-surface intersection
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_subpass(0)
+                .dst_stage_mask(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
                 .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ)
                 .build(),
+            // Subpass 1
+            // Make diffuse/normal/etc available for input attachments
             vk::SubpassDependency::builder()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
-                .dst_subpass(0)
-                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_subpass(1)
                 .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
-                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .dst_access_mask(vk::AccessFlags::INPUT_ATTACHMENT_READ)
+                .build(),
+            // Make light buffer changes available for blending
+            vk::SubpassDependency::builder()
+                .src_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_subpass(1)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
+                .build(),
+            // Make stencil changes by subpass 0 available
+            vk::SubpassDependency::builder()
+                .src_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_subpass(1)
+                .dst_stage_mask(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ)
                 .build(),
         ];
 
@@ -413,21 +475,130 @@ impl LightingFrond {
             .guard_with(device))
     }
 
-    unsafe fn create_pipeline(
+    unsafe fn create_volumetric_pipeline(
         device: &ash::Device,
-        triangle_vert_shader_module: vk::ShaderModule,
-        triangle_frag_shader_module: vk::ShaderModule,
+        volumetric_vert_shader_module: vk::ShaderModule,
+        volumetric_frag_shader_module: vk::ShaderModule,
         resolution: vk::Extent2D,
         pipeline_layout: vk::PipelineLayout,
         render_pass: vk::RenderPass,
     ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
         let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
         let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
-            .module(triangle_vert_shader_module)
+            .module(volumetric_vert_shader_module)
             .name(entry_point)
             .stage(vk::ShaderStageFlags::VERTEX);
         let frag_create_info = vk::PipelineShaderStageCreateInfo::builder()
-            .module(triangle_frag_shader_module)
+            .module(volumetric_frag_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::FRAGMENT);
+        let shader_stages = [*vert_create_info, *frag_create_info];
+
+        let vertex_input_state = Default::default();
+
+        let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: resolution.width as _,
+            height: resolution.height as _,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: resolution,
+        }];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        let rasterization_state = vk::PipelineRasterizationStateCreateInfo::builder()
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0);
+
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let stencil_op_state = vk::StencilOpState {
+            fail_op: vk::StencilOp::INVERT,
+            pass_op: vk::StencilOp::INVERT,
+            depth_fail_op: vk::StencilOp::INVERT,
+            compare_op: vk::CompareOp::ALWAYS,
+            compare_mask: 0,
+            write_mask: 1,
+            reference: 0,
+        };
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(true)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::GREATER)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(true)
+            .front(stencil_op_state)
+            .back(stencil_op_state)
+            //.min_depth_bounds()
+            //.max_depth_bounds()
+            ;
+
+        let attachments = [vk::PipelineColorBlendAttachmentState::builder()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::all())
+            .build()];
+        let color_blend_state =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
+
+        let graphics_pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly_state)
+            // .tesselation_state()
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization_state)
+            .multisample_state(&multisample_state)
+            .depth_stencil_state(&depth_stencil_state)
+            .color_blend_state(&color_blend_state)
+            // .dynamic_state()
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0)
+            .build()];
+
+        let mut pipelines = device
+            .create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &graphics_pipeline_create_infos,
+                None,
+            )
+            .map_err(|(_, err)| err)?;
+
+        Ok(pipelines.pop().unwrap().guard_with(device))
+    }
+
+    unsafe fn create_lighting_pipeline(
+        device: &ash::Device,
+        lighting_vert_shader_module: vk::ShaderModule,
+        lighting_frag_shader_module: vk::ShaderModule,
+        resolution: vk::Extent2D,
+        pipeline_layout: vk::PipelineLayout,
+        render_pass: vk::RenderPass,
+    ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
+        let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(lighting_vert_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::VERTEX);
+        let frag_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(lighting_frag_shader_module)
             .name(entry_point)
             .stage(vk::ShaderStageFlags::FRAGMENT);
         let shader_stages = [*vert_create_info, *frag_create_info];
@@ -462,7 +633,7 @@ impl LightingFrond {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(true)
+            .depth_test_enable(false)
             .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::GREATER)
             .depth_bounds_test_enable(false)
@@ -473,10 +644,16 @@ impl LightingFrond {
             //.max_depth_bounds()
             ;
 
-        let attachments = [vk::PipelineColorBlendAttachmentState {
-            color_write_mask: vk::ColorComponentFlags::all(),
-            ..Default::default()
-        }];
+        let attachments = [vk::PipelineColorBlendAttachmentState::builder()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::all())
+            .build()];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
 
@@ -493,7 +670,7 @@ impl LightingFrond {
             // .dynamic_state()
             .layout(pipeline_layout)
             .render_pass(render_pass)
-            .subpass(0)
+            .subpass(1)
             .build()];
 
         let mut pipelines = device
@@ -526,17 +703,29 @@ impl LightingFrond {
         draw_shadow(world_to_sunlight.into());
 
         let view: na::Matrix4<f32> = view.into();
+        let shadow_to_screen = view * sunlight_to_world;
         let screen_to_shadow = world_to_sunlight * view.try_inverse().unwrap();
 
         let sunlight_direction =
             (sunlight_to_world * na::Vector4::new(0.0, 0.0, -1.0, 0.0)).normalize();
+
+        let shadow_size = self.shared_frond.shadow().resolution.width;
 
         let render_area = vk::Rect2D {
             offset: Default::default(),
             extent: self.shared_frond.resolution(),
         };
 
-        let clear_values = [Default::default(), Default::default()];
+        let clear_values = [
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 0.0],
+                },
+            },
+        ];
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)
@@ -549,24 +738,6 @@ impl LightingFrond {
             vk::SubpassContents::INLINE,
         );
 
-        let light_buffer = LightBuffer {
-            screen_to_shadow: screen_to_shadow.into(),
-            sunlight_direction: sunlight_direction.into(),
-        };
-        device.cmd_push_constants(
-            command_buffer,
-            self.lighting_stem.pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            0,
-            light_buffer.as_std140().as_bytes(),
-        );
-
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipeline,
-        );
-
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
@@ -574,6 +745,55 @@ impl LightingFrond {
             0,
             &[self.descriptor_set],
             &[],
+        );
+
+        let light_buffer = LightBuffer {
+            // FIXME: need better name if I'm going to use this two different ways
+            screen_to_shadow: shadow_to_screen.into(),
+            sunlight_direction: sunlight_direction.into(),
+            shadow_size: shadow_size as _,
+        };
+        device.cmd_push_constants(
+            command_buffer,
+            self.lighting_stem.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            light_buffer.as_std140().as_bytes(),
+        );
+
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.volumetric_pipeline,
+        );
+
+        device.cmd_draw(
+            command_buffer,
+            6 * shadow_size * shadow_size + 24 * shadow_size - 12, // vertices
+            1,                                                     // instances
+            0,                                                     // first vertex
+            0,                                                     // first instance
+        );
+
+        device.cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+
+        let light_buffer = LightBuffer {
+            screen_to_shadow: screen_to_shadow.into(),
+            sunlight_direction: sunlight_direction.into(),
+            shadow_size: shadow_size as _,
+        };
+        device.cmd_push_constants(
+            command_buffer,
+            self.lighting_stem.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            light_buffer.as_std140().as_bytes(),
+        );
+
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.lighting_pipeline,
         );
 
         device.cmd_draw(
@@ -595,7 +815,8 @@ impl Drop for LightingFrond {
             let _ = device.device_wait_idle();
 
             device.destroy_framebuffer(self.framebuffer, None);
-            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.volumetric_pipeline, None);
+            device.destroy_pipeline(self.lighting_pipeline, None);
             device.destroy_render_pass(self.render_pass, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
         }
