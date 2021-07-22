@@ -5,6 +5,7 @@ layout(set = 0, binding = 3) uniform sampler2D shadow;
 layout(push_constant) uniform LightBuffer {
     mat4 light_to_screen;
     vec4 sunlight_direction;
+    vec4 waterTransparency;
     int shadow_size;
 } light_buffer;
 

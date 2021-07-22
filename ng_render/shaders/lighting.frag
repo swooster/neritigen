@@ -8,6 +8,7 @@ layout(set = 0, binding = 3) uniform sampler2D shadow;
 layout(push_constant) uniform LightBuffer {
     mat4 screen_to_light;
     vec4 sunlight_direction;
+    vec4 water_transparency;
     int shadow_size;
 } light_buffer;
 
@@ -24,5 +25,11 @@ void main() {
 
     float cosine_factor = clamp(-dot(light_buffer.sunlight_direction.xyz, 2 * subpassLoad(normal).rgb - vec3(1)), 0, 1);
 
-    fragColor = (0.95 * shadow_factor * cosine_factor + 0.05) * subpassLoad(diffuse).rgb;
+    vec3 ndc2 = vec3(ndc.xy, subpassLoad(depth).r);
+    // ick... should be using a view matrix or some such to figure this out
+    float near_z = 0.1;
+    float d = near_z / ndc2.z; // wrong - not actual distance, oh well
+    vec3 water_absorption_factor = pow(light_buffer.water_transparency.xyz, vec3(d));
+
+    fragColor = (0.95 * shadow_factor * cosine_factor + 0.05) * water_absorption_factor * subpassLoad(diffuse).rgb;
 }

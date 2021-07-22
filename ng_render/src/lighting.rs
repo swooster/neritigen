@@ -17,6 +17,7 @@ use crate::{
 struct LightBuffer {
     pub screen_to_shadow: mint::ColumnMatrix4<f32>,
     pub sunlight_direction: mint::Vector4<f32>,
+    pub water_transparency: mint::Vector4<f32>,
     pub shadow_size: i32,
 }
 
@@ -821,10 +822,10 @@ impl LightingFrond {
         let device = self.shared_frond.device();
 
         let sunlight_to_world: na::Matrix4<f32> = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.5, 1.0, 2.0, 0.0],
-            [-0.25, -0.5, -1.0, 1.0],
+            [16.0, 0.0, 0.0, 0.0],
+            [0.0, 16.0, 0.0, 0.0],
+            [1.0, 4.0, 16.0, 0.0],
+            [-1.0, -2.0, -8.0, 1.0],
         ]
         .into();
         let world_to_sunlight = sunlight_to_world.try_inverse().unwrap();
@@ -838,6 +839,8 @@ impl LightingFrond {
             (sunlight_to_world * na::Vector4::new(0.0, 0.0, -1.0, 0.0)).normalize();
 
         let shadow_size = self.shared_frond.shadow().resolution.width;
+
+        let water_transparency = [0.5, 0.75, 0.8, 0.1].into();
 
         let render_area = vk::Rect2D {
             offset: Default::default(),
@@ -879,6 +882,7 @@ impl LightingFrond {
             // FIXME: need better name if I'm going to use this two different ways
             screen_to_shadow: shadow_to_screen.into(),
             sunlight_direction: sunlight_direction.into(),
+            water_transparency,
             shadow_size: shadow_size as _,
         };
         device.cmd_push_constants(
@@ -936,6 +940,7 @@ impl LightingFrond {
         let light_buffer = LightBuffer {
             screen_to_shadow: screen_to_shadow.into(),
             sunlight_direction: sunlight_direction.into(),
+            water_transparency,
             shadow_size: shadow_size as _,
         };
         device.cmd_push_constants(
