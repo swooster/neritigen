@@ -8,6 +8,8 @@ layout(push_constant) uniform LightBuffer {
     int shadow_size;
 } light_buffer;
 
+layout(location = 0) out vec4 ndc;
+
 ivec2 square_vertices[6] = ivec2[](
     ivec2(-1, -1),
     ivec2(-1, 0),
@@ -37,7 +39,7 @@ void main() {
         vec2 shadow_coords = vec2(clamped_ij) / (shadow_size - 1);
         float shadow_depth = ij == clamped_ij ? texture(shadow, shadow_coords).r : 1;
         vec4 light_coords = vec4(shadow_coords * 2 - vec2(1.0, 1.0), shadow_depth, 1.0);
-        gl_Position = light_buffer.light_to_screen * light_coords;
+        ndc = light_buffer.light_to_screen * light_coords;
 
     } else {
 
@@ -54,6 +56,8 @@ void main() {
 
         vec2 shadow_coords = vec2(ij) / (shadow_size - 1);
         vec4 light_coords = vec4(shadow_coords * 2 - vec2(1.0, 1.0), 1.0, 1.0);
-        gl_Position = light_buffer.light_to_screen * light_coords;
+        ndc = light_buffer.light_to_screen * light_coords;
     }
+
+    gl_Position = ndc;
 }

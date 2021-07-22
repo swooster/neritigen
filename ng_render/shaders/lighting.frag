@@ -11,11 +11,11 @@ layout(push_constant) uniform LightBuffer {
     int shadow_size;
 } light_buffer;
 
-layout(location = 0) in vec2 ndc;
+layout(location = 0) in vec4 ndc;
 layout(location = 0) out vec3 fragColor;
 
 void main() {
-    vec4 position_in_light = light_buffer.screen_to_light * vec4(ndc, subpassLoad(depth).r, 1);
+    vec4 position_in_light = light_buffer.screen_to_light * vec4(ndc.xy, subpassLoad(depth).r, 1);
     vec2 shadow_coords = 0.5 * position_in_light.xy / position_in_light.w + vec2(0.5);
     float geometry_depth = position_in_light.z / position_in_light.w;
     float shadow_depth = texture(shadow, shadow_coords, 0.0).r;

@@ -35,6 +35,7 @@ pub struct LightingStem {
     lighting_frag_shader_module: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
     shadow_sampler: vk::Sampler,
+    volumetric_far_cap_frag_shader_module: vk::ShaderModule,
     volumetric_frag_shader_module: vk::ShaderModule,
     volumetric_vert_shader_module: vk::ShaderModule,
     shared_stem: Arc<SharedStem>,
@@ -63,6 +64,15 @@ impl LightingStem {
                 util::create_shader_module(device, include_glsl!("shaders/volumetric.frag"))?;
             shared_stem.set_name(*volumetric_frag_shader_module, "volumetric frag")?;
 
+            let volumetric_far_cap_frag_shader_module = util::create_shader_module(
+                device,
+                include_glsl!("shaders/volumetric-far-cap.frag"),
+            )?;
+            shared_stem.set_name(
+                *volumetric_far_cap_frag_shader_module,
+                "volumetric farcap frag",
+            )?;
+
             let lighting_frag_shader_module =
                 util::create_shader_module(device, include_glsl!("shaders/lighting.frag"))?;
             shared_stem.set_name(*lighting_frag_shader_module, "lighting frag")?;
@@ -75,6 +85,7 @@ impl LightingStem {
                 lighting_frag_shader_module: lighting_frag_shader_module.take(),
                 pipeline_layout: pipeline_layout.take(),
                 shadow_sampler: shadow_sampler.take(),
+                volumetric_far_cap_frag_shader_module: volumetric_far_cap_frag_shader_module.take(),
                 volumetric_frag_shader_module: volumetric_frag_shader_module.take(),
                 volumetric_vert_shader_module: volumetric_vert_shader_module.take(),
                 shared_stem,
@@ -152,6 +163,7 @@ impl Drop for LightingStem {
             let _ = device.device_wait_idle();
 
             device.destroy_sampler(self.shadow_sampler, None);
+            device.destroy_shader_module(self.volumetric_far_cap_frag_shader_module, None);
             device.destroy_shader_module(self.volumetric_frag_shader_module, None);
             device.destroy_shader_module(self.volumetric_vert_shader_module, None);
             device.destroy_shader_module(self.lighting_frag_shader_module, None);
@@ -168,6 +180,8 @@ pub struct LightingFrond {
     lighting_pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
     volumetric_pipeline: vk::Pipeline,
+    volumetric_near_cap_pipeline: vk::Pipeline,
+    volumetric_far_cap_pipeline: vk::Pipeline,
     shared_frond: Arc<SharedFrond>,
     lighting_stem: Arc<LightingStem>,
 }
@@ -223,8 +237,32 @@ impl LightingFrond {
                 shared_frond.resolution(),
                 lighting_stem.pipeline_layout,
                 *render_pass,
+                vk::CompareOp::ALWAYS,
+                true, // depth test enable
             )?;
             shared_stem.set_name(*volumetric_pipeline, "volumetric")?;
+
+            let volumetric_near_cap_pipeline = Self::create_volumetric_pipeline(
+                device,
+                shared_frond.stem().fullscreen_vert_shader_module(),
+                lighting_stem.volumetric_frag_shader_module,
+                shared_frond.resolution(),
+                lighting_stem.pipeline_layout,
+                *render_pass,
+                vk::CompareOp::EQUAL,
+                false, // depth test enable
+            )?;
+            shared_stem.set_name(*volumetric_near_cap_pipeline, "volumetric near cap")?;
+
+            let volumetric_far_cap_pipeline = Self::create_volumetric_far_cap_pipeline(
+                device,
+                shared_frond.stem().fullscreen_vert_shader_module(),
+                lighting_stem.volumetric_far_cap_frag_shader_module,
+                shared_frond.resolution(),
+                lighting_stem.pipeline_layout,
+                *render_pass,
+            )?;
+            shared_stem.set_name(*volumetric_far_cap_pipeline, "volumetric far cap")?;
 
             let lighting_pipeline = Self::create_lighting_pipeline(
                 device,
@@ -255,6 +293,8 @@ impl LightingFrond {
                 lighting_pipeline: lighting_pipeline.take(),
                 render_pass: render_pass.take(),
                 volumetric_pipeline: volumetric_pipeline.take(),
+                volumetric_near_cap_pipeline: volumetric_near_cap_pipeline.take(),
+                volumetric_far_cap_pipeline: volumetric_far_cap_pipeline.take(),
                 descriptor_set,
                 shared_frond,
                 lighting_stem,
@@ -291,7 +331,7 @@ impl LightingFrond {
         let depth_info = [vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
             image_view: depth_view,
-            image_layout: vk::ImageLayout::GENERAL, // TODO: vulkan 1.2 so I can do DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let shadow_info = [vk::DescriptorImageInfo {
             sampler: shadow_sampler,
@@ -363,7 +403,7 @@ impl LightingFrond {
                 .load_op(vk::AttachmentLoadOp::LOAD)
                 .store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::GENERAL)
+                .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .build(),
             vk::AttachmentDescription::builder()
                 .format(light_format)
@@ -386,7 +426,7 @@ impl LightingFrond {
             },
             vk::AttachmentReference {
                 attachment: 2,
-                layout: vk::ImageLayout::GENERAL,
+                layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             },
         ];
         let color_attachments = [vk::AttachmentReference {
@@ -396,10 +436,6 @@ impl LightingFrond {
         let depth_stencil_attachment = vk::AttachmentReference {
             attachment: 2,
             layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
-        let depth_stencil_attachment_general = vk::AttachmentReference {
-            attachment: 2,
-            layout: vk::ImageLayout::GENERAL,
         };
         let subpasses = [
             vk::SubpassDescription::builder()
@@ -412,7 +448,7 @@ impl LightingFrond {
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .input_attachments(&input_attachments)
                 .color_attachments(&color_attachments)
-                .depth_stencil_attachment(&depth_stencil_attachment_general)
+                // .depth_stencil_attachment(&depth_stencil_attachment_general)
                 .build(),
         ];
 
@@ -482,6 +518,8 @@ impl LightingFrond {
         resolution: vk::Extent2D,
         pipeline_layout: vk::PipelineLayout,
         render_pass: vk::RenderPass,
+        stencil_compare_op: vk::CompareOp,
+        depth_test_enable: bool,
     ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
         let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
         let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
@@ -527,13 +565,13 @@ impl LightingFrond {
             fail_op: vk::StencilOp::INVERT,
             pass_op: vk::StencilOp::INVERT,
             depth_fail_op: vk::StencilOp::INVERT,
-            compare_op: vk::CompareOp::ALWAYS,
-            compare_mask: 0,
+            compare_op: stencil_compare_op,
+            compare_mask: 1,
             write_mask: 1,
-            reference: 0,
+            reference: 1,
         };
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(true)
+            .depth_test_enable(depth_test_enable)
             .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::GREATER)
             .depth_bounds_test_enable(false)
@@ -549,8 +587,8 @@ impl LightingFrond {
             .src_color_blend_factor(vk::BlendFactor::ONE)
             .dst_color_blend_factor(vk::BlendFactor::ONE)
             .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::all())
             .build()];
@@ -571,6 +609,106 @@ impl LightingFrond {
             .layout(pipeline_layout)
             .render_pass(render_pass)
             .subpass(0)
+            .build()];
+
+        let mut pipelines = device
+            .create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &graphics_pipeline_create_infos,
+                None,
+            )
+            .map_err(|(_, err)| err)?;
+
+        Ok(pipelines.pop().unwrap().guard_with(device))
+    }
+
+    unsafe fn create_volumetric_far_cap_pipeline(
+        device: &ash::Device,
+        fullscreen_vert_shader_module: vk::ShaderModule,
+        volumetric_far_cap_frag_shader_module: vk::ShaderModule,
+        resolution: vk::Extent2D,
+        pipeline_layout: vk::PipelineLayout,
+        render_pass: vk::RenderPass,
+    ) -> VkResult<Guarded<(vk::Pipeline, &ash::Device)>> {
+        let entry_point = CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let vert_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(fullscreen_vert_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::VERTEX);
+        let frag_create_info = vk::PipelineShaderStageCreateInfo::builder()
+            .module(volumetric_far_cap_frag_shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::FRAGMENT);
+        let shader_stages = [*vert_create_info, *frag_create_info];
+
+        let vertex_input_state = Default::default();
+
+        let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: resolution.width as _,
+            height: resolution.height as _,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: resolution,
+        }];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        let rasterization_state = vk::PipelineRasterizationStateCreateInfo::builder()
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0);
+
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            // .depth_compare_op(vk::CompareOp::GREATER)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false)
+            // .front()
+            // .back()
+            //.min_depth_bounds()
+            //.max_depth_bounds()
+            ;
+
+        let attachments = [vk::PipelineColorBlendAttachmentState::builder()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::DST_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::all())
+            .build()];
+        let color_blend_state =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
+
+        let graphics_pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly_state)
+            // .tesselation_state()
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization_state)
+            .multisample_state(&multisample_state)
+            .depth_stencil_state(&depth_stencil_state)
+            .color_blend_state(&color_blend_state)
+            // .dynamic_state()
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(1)
             .build()];
 
         let mut pipelines = device
@@ -632,17 +770,7 @@ impl LightingFrond {
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(false)
-            .depth_write_enable(false)
-            .depth_compare_op(vk::CompareOp::GREATER)
-            .depth_bounds_test_enable(false)
-            .stencil_test_enable(false)
-            //.front()
-            //.back()
-            //.min_depth_bounds()
-            //.max_depth_bounds()
-            ;
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder();
 
         let attachments = [vk::PipelineColorBlendAttachmentState::builder()
             .blend_enable(true)
@@ -775,7 +903,35 @@ impl LightingFrond {
             0,                                                     // first instance
         );
 
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.volumetric_near_cap_pipeline,
+        );
+
+        device.cmd_draw(
+            command_buffer,
+            3, // vertices
+            1, // instances
+            0, // first vertex
+            0, // first instance
+        );
+
         device.cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.volumetric_far_cap_pipeline,
+        );
+
+        device.cmd_draw(
+            command_buffer,
+            3, // vertices
+            1, // instances
+            0, // first vertex
+            0, // first instance
+        );
 
         let light_buffer = LightBuffer {
             screen_to_shadow: screen_to_shadow.into(),
@@ -815,6 +971,8 @@ impl Drop for LightingFrond {
             let _ = device.device_wait_idle();
 
             device.destroy_framebuffer(self.framebuffer, None);
+            device.destroy_pipeline(self.volumetric_far_cap_pipeline, None);
+            device.destroy_pipeline(self.volumetric_near_cap_pipeline, None);
             device.destroy_pipeline(self.volumetric_pipeline, None);
             device.destroy_pipeline(self.lighting_pipeline, None);
             device.destroy_render_pass(self.render_pass, None);
